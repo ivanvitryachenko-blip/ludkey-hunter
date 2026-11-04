@@ -1,0 +1,11 @@
+node_modules/
+data/
+*.tmp
+*.bak
+ludkey-checkpoint.json*
+chunk-*.json
+CLAIM_*.json
+FOUND_*.json
+agent-cred.json
+packages/agent-cuda/ludkey_cuda
+.DS_Store

@@ -1,0 +1,20 @@
+{
+  "name": "ludkey-hunter",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Research platform for Bitcoin Puzzle #71 — verified secp256k1/SHA-256/RIPEMD-160 search with CPU, WebGPU and CUDA backends and multi-device coordination.",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node scripts/run-tests.mjs",
+    "test:core": "node --experimental-strip-types packages/core/test/core.test.ts",
+    "test:engine": "node --experimental-strip-types packages/engine/test/engine.test.ts",
+    "test:allocator": "node --experimental-strip-types packages/server/test/allocator.test.ts",
+    "test:server": "node --experimental-strip-types packages/server/test/server.integration.test.ts",
+    "bench": "node --experimental-strip-types packages/engine/bench.ts 10 1024",
+    "search": "node --experimental-strip-types packages/engine/cli.ts",
+    "demo": "node --experimental-strip-types packages/engine/cli.ts --demo 40000000000000abcd",
+    "server": "node --experimental-strip-types packages/server/src/server.ts",
+    "agent": "node --experimental-strip-types packages/engine/agent.ts"
+  }
+}
