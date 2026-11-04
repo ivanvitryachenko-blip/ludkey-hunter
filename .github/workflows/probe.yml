@@ -1,0 +1,26 @@
+name: Probe live coordinator
+
+# Read-only: curls the live worker without deploying, so we can see its CURRENT
+# state (independent of any deploy race).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe
+        run: |
+          BASE="https://ludkey-hunter.8jt6mh8rz9.workers.dev"
+          echo "=== GET /api/info ==="
+          curl -s -o /tmp/i -w "HTTP %{http_code}\n" "$BASE/api/info"; cat /tmp/i; echo
+          echo "=== POST /api/register ==="
+          curl -s -o /tmp/r -w "HTTP %{http_code}\n" -X POST -H 'content-type: application/json' -d '{"type":"probe"}' "$BASE/api/register"; cat /tmp/r; echo
+          TOKEN=$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' /tmp/r)
+          echo "token=$TOKEN"
+          echo "=== POST /api/lease (fresh token) ==="
+          curl -s -o /tmp/l -w "HTTP %{http_code}\n" -X POST -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d '{}' "$BASE/api/lease"; cat /tmp/l; echo
+          echo "=== POST /api/lease (bad token) ==="
+          curl -s -o /tmp/b -w "HTTP %{http_code}\n" -X POST -H "authorization: Bearer BADTOKEN" -H 'content-type: application/json' -d '{}' "$BASE/api/lease"; cat /tmp/b; echo
+          echo "=== POST /api/heartbeat ==="
+          curl -s -o /tmp/h -w "HTTP %{http_code}\n" -X POST -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d '{"speed":1,"scanned":"0"}' "$BASE/api/heartbeat"; cat /tmp/h; echo
