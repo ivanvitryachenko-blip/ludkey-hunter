@@ -22,6 +22,8 @@
 // Durable Objects with SQLite storage are free-tier eligible). I cannot deploy
 // it for you; the README has the three commands.
 
+import { APP_HTML } from "./app.js"; // the web app, embedded (served from "/")
+
 // ---------------------------------------------------------------------------
 // Puzzle #72 parameters (checksum-verified in the TS core).
 // ---------------------------------------------------------------------------
@@ -302,15 +304,18 @@ export default {
   async fetch(req, env) {
     const url = new URL(req.url);
     if (req.method === "OPTIONS") return cors(new Response(null, { status: 204 }));
+    // The Worker handles EVERY request directly — no static-asset layer in
+    // front of it — so /api/* always reaches the coordinator.
     if (url.pathname.startsWith("/api/")) {
       const id = env.COORDINATOR.idFromName("global");
       const stub = env.COORDINATOR.get(id);
       const res = await stub.fetch(req);
       return cors(res);
     }
-    // Static assets (the web app). Configured via [assets] in wrangler.toml.
-    if (env.ASSETS) return env.ASSETS.fetch(req);
-    return new Response("web app not bundled; set [assets] directory in wrangler.toml", { status: 404 });
+    if (url.pathname === "/" || url.pathname === "/index.html") {
+      return new Response(APP_HTML, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+    }
+    return new Response("Not found", { status: 404 });
   },
 };
 

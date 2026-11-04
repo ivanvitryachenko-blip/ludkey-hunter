@@ -13,15 +13,9 @@ name = "ludkey-hunter"
 main = "src/worker.js"
 compatibility_date = "2025-01-01"
 
-# Serve the web app (packages/cloudflare/public/index.html) from the same URL,
-# so the app and the coordinator share one origin (no CORS to configure).
-# run_worker_first = true: EVERY request invokes the Worker first. The Worker
-# routes /api/* to the Durable Object and serves everything else from ASSETS.
-# This removes all ambiguity about the static-asset layer swallowing /api/*.
-[assets]
-directory = "public"
-binding = "ASSETS"
-run_worker_first = true
+# The web app is embedded in the Worker (src/app.js) and served from "/", so
+# there is NO static-asset layer in front of the Worker — every request,
+# including /api/*, is handled by the Worker directly.
 
 # The coordinator is one Durable Object instance holding the shared allocator
 # state, so leasing chunks is atomic across all devices.
