@@ -306,11 +306,29 @@ export default {
     if (req.method === "OPTIONS") return cors(new Response(null, { status: 204 }));
     // The Worker handles EVERY request directly — no static-asset layer in
     // front of it — so /api/* always reaches the coordinator.
+    // /api/info is static puzzle data — answer it from the Worker itself, so it
+    // works even if the Durable Object is unavailable. If this returns JSON but
+    // the stateful endpoints below don't, the problem is the Durable Object.
+    if (url.pathname === "/api/info" && req.method === "GET") {
+      return cors(json({
+        puzzle: PUZZLE.number, address: PUZZLE.address, hash160: PUZZLE.hash160,
+        rangeStart: "0x" + PUZZLE.rangeStart.toString(16),
+        rangeEnd: "0x" + PUZZLE.rangeEnd.toString(16),
+        chunkSize: "0x" + (1n << DEFAULT_CHUNK_BITS).toString(16),
+        worker: "ok",
+      }));
+    }
     if (url.pathname.startsWith("/api/")) {
-      const id = env.COORDINATOR.idFromName("global");
-      const stub = env.COORDINATOR.get(id);
-      const res = await stub.fetch(req);
-      return cors(res);
+      try {
+        if (!env.COORDINATOR) return cors(json({ error: "Durable Object binding COORDINATOR is missing on this deployment" }, 500));
+        const id = env.COORDINATOR.idFromName("global");
+        const stub = env.COORDINATOR.get(id);
+        const res = await stub.fetch(req);
+        return cors(res);
+      } catch (e) {
+        // Surface the real cause as JSON instead of a Cloudflare HTML error page.
+        return cors(json({ error: "coordinator error: " + String((e && e.stack) || (e && e.message) || e) }, 500));
+      }
     }
     if (url.pathname === "/" || url.pathname === "/index.html") {
       return new Response(APP_HTML, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
