@@ -15,10 +15,12 @@ compatibility_date = "2025-01-01"
 
 # Serve the web app (packages/cloudflare/public/index.html) from the same URL,
 # so the app and the coordinator share one origin (no CORS to configure).
+# No not_found_handling: a request that doesn't match a static asset (every
+# /api/* call) falls through to the Worker — and thus the Durable Object —
+# instead of being shadowed by an SPA index.html fallback.
 [assets]
 directory = "public"
 binding = "ASSETS"
-not_found_handling = "single-page-application"
 
 # The coordinator is one Durable Object instance holding the shared allocator
 # state, so leasing chunks is atomic across all devices.
