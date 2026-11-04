@@ -67,16 +67,29 @@ class RangeAllocator {
     return { index, start: s, end: e };
   }
 
+  // Hand out a RANDOM unclaimed segment (not sequential), so devices explore
+  // the range in random order. Still no overlap: a segment that is done or
+  // currently leased is never re-handed. With ~2^46 segments and only a tiny
+  // claimed set, a random pick almost always lands on a free segment at once.
   lease(deviceId, now = Date.now()) {
     this.reclaimExpired(now);
-    let index;
-    if (this.reclaimed.length > 0) {
-      index = this.reclaimed.shift();
-    } else if (this.nextIndex < this.chunkCount) {
-      index = this.nextIndex;
-      this.nextIndex += 1n;
-    } else {
-      return null;
+    const total = this.chunkCount;
+    if (BigInt(this.done.size) + BigInt(this.active.size) >= total) return null; // all claimed
+    let index = null;
+    for (let tries = 0; tries < 64; tries++) {
+      const cand = randBelow(total);
+      const key = cand.toString();
+      if (!this.done.has(key) && !this.active.has(key)) { index = cand; break; }
+    }
+    if (index === null) {
+      // Dense fallback (practically never hit): linear scan from a random offset.
+      const start = randBelow(total);
+      for (let i = 0n; i < total; i++) {
+        const cand = (start + i) % total;
+        const key = cand.toString();
+        if (!this.done.has(key) && !this.active.has(key)) { index = cand; break; }
+      }
+      if (index === null) return null;
     }
     this.active.set(index.toString(), { deviceId, leaseUntil: now + this.leaseMs, scanned: 0n });
     return this.chunkAt(index);
@@ -120,12 +133,10 @@ class RangeAllocator {
     return n;
   }
 
-  freeIndex(index) {
-    if (this.done.has(index.toString())) return;
-    let lo = 0, hi = this.reclaimed.length;
-    while (lo < hi) { const mid = (lo + hi) >> 1; if (this.reclaimed[mid] < index) lo = mid + 1; else hi = mid; }
-    if (this.reclaimed[lo] !== index) this.reclaimed.splice(lo, 0, index);
-  }
+  // Random mode: a freed segment simply leaves `active`/`done`, which makes it
+  // unclaimed again and eligible to be picked at random later. No ordered
+  // reclaim list is needed, so this is intentionally a no-op.
+  freeIndex(_index) { /* no-op in random mode */ }
 
   activeChunks() {
     const out = [];
@@ -143,7 +154,7 @@ class RangeAllocator {
     const scanned = this.doneScanned + activeScanned;
     return {
       chunkCount: this.chunkCount.toString(),
-      pending: (this.chunkCount - this.nextIndex + BigInt(this.reclaimed.length)).toString(),
+      pending: (this.chunkCount - BigInt(this.done.size) - BigInt(this.active.size)).toString(),
       assigned: this.active.size,
       done: this.done.size,
       scanned, total,
@@ -349,6 +360,13 @@ function cors(res) {
   return new Response(res.body, { status: res.status, headers: h });
 }
 async function body(req) { try { return await req.json(); } catch { return {}; } }
+// Uniform-ish random bigint in [0, n). n is the segment count (~2^46), so 96
+// random bits make the modulo bias negligible.
+function randBelow(n) {
+  const a = new Uint32Array(3); crypto.getRandomValues(a);
+  const r = (BigInt(a[0]) << 64n) | (BigInt(a[1]) << 32n) | BigInt(a[2]);
+  return r % n;
+}
 function hex(bytes) {
   const a = new Uint8Array(bytes); crypto.getRandomValues(a);
   return [...a].map((b) => b.toString(16).padStart(2, "0")).join("");
