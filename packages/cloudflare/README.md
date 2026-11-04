@@ -5,6 +5,19 @@ PC, no port forwarding, no fixed IP. One link is both the app and the shared
 coordinator: open it on your phone and every computer, and they split the #72
 range into non-overlapping **2²⁵ segments** and search together.
 
+## Deploy in one click (no terminal)
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ivanvitryachenko-blip/ludkey-hunter/tree/main/packages/cloudflare)
+
+Click the button, sign in to **your** Cloudflare account in the browser, and
+Cloudflare forks the repo and deploys the Worker for you. When it finishes it
+shows your public URL (`https://ludkey-hunter.<you>.workers.dev`) — open that
+on every device. Free plan is enough (SQLite Durable Objects are free-tier).
+
+> I can't press this for you: it runs under your own Cloudflare login, and my
+> build environment can't reach Cloudflare at all. The button is the no-terminal
+> path; the three commands below are the terminal path. Either works.
+
 ## What runs where
 
 - **Worker** (`src/worker.js`) — handles `/api/*` and serves the web app.

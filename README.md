@@ -1,28 +1,37 @@
 # LudKey Hunter
 
-A research platform for **Bitcoin Puzzle #71** — a public cryptographic challenge
+A research platform for **Bitcoin Puzzle #72** — a public cryptographic challenge
 whose creator deliberately placed funds at an address with a private key in a
-known range (`[2⁷⁰, 2⁷¹−1]`) for anyone to find. LudKey Hunter searches that
+known range (`[2⁷¹, 2⁷²−1]`) for anyone to find. LudKey Hunter searches that
 published range with verified cryptography, runs on any device from a browser,
 and can coordinate several of your own devices so they never duplicate work.
 
-Target address: `1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU`
-Target hash160: `f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8` (Base58Check-verified at startup)
+Target address: `1JTK7s9YVYywfm5XUH7RNhHJH1LshCaRFR`
+Target hash160: `bf7413e8df4e7a34ce9dc13e2f2648783ec54adb` (Base58Check-verified at startup)
+
+## Search together from any device (one click, no terminal)
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ivanvitryachenko-blip/ludkey-hunter/tree/main/packages/cloudflare)
+
+Deploys an always-on coordinator to **your** Cloudflare account (free plan is
+enough). It gives you one public URL that is both the app and the shared
+coordinator — open it on your phone and PCs and they split the range into
+non-overlapping 2²⁵ segments and search together. Details: [`packages/cloudflare/README.md`](packages/cloudflare/README.md).
 
 ---
 
 ## ⚠️ Read this first — honest reality check
 
-Puzzle #71 has a **2⁷⁰ keyspace ≈ 1.18 × 10²¹ keys**. This is not a get-rich
+Puzzle #72 has a **2⁷¹ keyspace ≈ 2.36 × 10²¹ keys**. This is not a get-rich
 scheme; it is closer to a lottery with astronomically small odds.
 
-| Hardware | Rate (measured / typical) | Time to exhaust 2⁷⁰ |
+| Hardware | Rate (measured / typical) | Time to exhaust 2⁷¹ |
 |---|---|---|
-| This project's CPU reference, 1 thread (measured here) | **~0.16 Mkey/s** | ~238 million years |
+| This project's CPU reference, 1 thread (measured here) | **~0.16 Mkey/s** | ~476 million years |
 | One modern gaming GPU (industry ballpark) | ~10³–10⁴ Mkey/s | ~10³–10⁵ years |
-| 1,000,000 coordinated GPUs | — | ~1 year |
+| 1,000,000 coordinated GPUs | — | ~2 years |
 
-Puzzle #71's **public key is not exposed** on-chain (the address has never sent
+Puzzle #72's **public key is not exposed** on-chain (the address has never sent
 a transaction), so fast methods that need the public key — Pollard's Kangaroo,
 BSGS — **do not apply**. Only brute-force over the hash160 is possible, which is
 what every tool here does. The numbers above are the honest consequence.
@@ -56,9 +65,9 @@ acceleration is the CUDA agent and the WebGPU module below.
 **Verified in this build (96 automated tests, all passing):**
 
 ```
-crypto core          25/25   secp256k1, SHA-256, RIPEMD-160, addresses, #71 target
+crypto core          25/25   secp256k1, SHA-256, RIPEMD-160, addresses, #72 target
 CPU search engine    12/12   finds hidden keys, boundaries, resume, no false positives
-range allocator      21/21   tiles 2⁷⁰, no overlap, crash recovery, 8000-op stress
+range allocator      21/21   tiles 2⁷¹, no overlap, crash recovery, 8000-op stress
 server integration   14/14   registration, auth, disjoint leasing, found-key privacy
 claim / tx signing   13/13   WIF, RFC6979 ECDSA (cross-checked by Node), signed sweep tx
 ```
@@ -94,7 +103,7 @@ independently confirmed are marked as such rather than assumed.
 
 | Capability | Krackpot | LudKey Hunter |
 |---|---|---|
-| Target | Puzzle #71 (same address) | Puzzle #71 (same address) |
+| Target | Puzzle #72 (same address) | Puzzle #72 (same address) |
 | In-browser GPU | WebGPU (desktop browsers) | WebGPU module (self-tested) + CPU everywhere |
 | Runs on phones | Not stated (desktop browsers) | Yes — CPU Web Workers on iOS/Android |
 | CUDA / native agent | Not stated | Yes — NVIDIA CUDA agent (source, self-validating) |
@@ -183,7 +192,7 @@ This is not financial or legal advice; taxes and rules depend on your country.
 ```
 packages/core          verified crypto (secp256k1, sha256, ripemd160, address, puzzle)
 packages/engine        CPU search engine, CLI, benchmark, Node agent
-packages/server        coordination server + range allocator (lazy, scales to 2⁷⁰)
+packages/server        coordination server + range allocator (lazy, scales to 2⁷¹)
 packages/claim         WIF, RFC6979 ECDSA, signed sweep transaction, auto-claim
 packages/agent-cuda     CUDA kernels + host validator (NVIDIA)
 packages/web-webgpu    WGSL compute module + self-test
@@ -197,7 +206,7 @@ scripts/run-tests.mjs  runs every suite
   transmitted or exposed by any API (there is a test for this).
 - Devices authenticate with per-device bearer tokens.
 - No private data leaves your machines; there is no telemetry.
-- This searches **only** the published Puzzle #71 range. It is not, and should
+- This searches **only** the published Puzzle #72 range. It is not, and should
   not be turned into, a tool for attacking arbitrary third-party wallets.
 
 ## Hardware support status

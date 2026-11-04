@@ -1,0 +1,14 @@
+{
+  "name": "ludkey-hunter-coordinator",
+  "version": "1.0.0",
+  "private": true,
+  "description": "LudKey Hunter serverless coordinator (Cloudflare Worker + Durable Object) for Bitcoin Puzzle #72",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "start": "wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^3.99.0"
+  }
+}
