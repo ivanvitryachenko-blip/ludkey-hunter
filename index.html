@@ -1129,8 +1129,10 @@ async function connRegister(){
   const key = "ludkey.cred."+connServer;
   try{ const c=JSON.parse(localStorage.getItem(key)||"null"); if(c&&c.token){ connCred=c; return; } }catch(_){}
   const type = deviceType();
-  const r = await fetch(connServer+"/api/register", { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({ name:(type+"-"+Math.random().toString(16).slice(2,6)), type }) });
-  const j = await r.json(); connCred = { id:j.deviceId, token:j.token };
+  // connApi retries transient failures (cold-start empty responses), so a single
+  // blip no longer fails registration.
+  const j = await connApi("/api/register","POST",{ name:(type+"-"+Math.random().toString(16).slice(2,6)), type }, 5);
+  connCred = { id:j.deviceId, token:j.token };
   try{ localStorage.setItem(key, JSON.stringify(connCred)); }catch(_){}
 }
 // "1 worker = 1 segment": each lease loop owns a whole segment. These scan one

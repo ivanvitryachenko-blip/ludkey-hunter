@@ -197,25 +197,31 @@ export class Coordinator {
     this.allocator = null;
     this.devices = new Map();
     this.chunkSize = 1n << (env.CHUNK_BITS ? BigInt(env.CHUNK_BITS) : DEFAULT_CHUNK_BITS);
-    // Load persisted state before serving any request.
+    // Load persisted state before serving any request. load() never throws, so
+    // the Durable Object always constructs and never returns an empty response.
     this.ctx.blockConcurrencyWhile(async () => { await this.load(); });
   }
 
   async load() {
-    const stored = await this.ctx.storage.get(["allocator", "devices"]);
-    const allocStr = stored.get("allocator");
-    if (allocStr) {
-      const restored = RangeAllocator.deserialize(allocStr, LEASE_MS);
-      // Discard state from a different puzzle/range (e.g. an old #71 store).
-      if (restored.rangeStart === PUZZLE.rangeStart && restored.rangeEnd === PUZZLE.rangeEnd) {
-        this.allocator = restored;
+    try {
+      const stored = await this.ctx.storage.get(["allocator", "devices"]);
+      const allocStr = stored.get("allocator");
+      if (allocStr) {
+        try {
+          const restored = RangeAllocator.deserialize(allocStr, LEASE_MS);
+          // Discard state from a different puzzle/range (e.g. an old #71 store).
+          if (restored.rangeStart === PUZZLE.rangeStart && restored.rangeEnd === PUZZLE.rangeEnd) {
+            this.allocator = restored;
+          }
+        } catch {}
       }
-    }
+      const devStr = stored.get("devices");
+      if (devStr) { try { for (const d of JSON.parse(devStr)) this.devices.set(d.id, d); } catch {} }
+    } catch {}
+    // Always end with a valid allocator, whatever happened above.
     if (!this.allocator) {
       this.allocator = new RangeAllocator(PUZZLE.rangeStart, PUZZLE.rangeEnd, this.chunkSize, LEASE_MS);
     }
-    const devStr = stored.get("devices");
-    if (devStr) { try { for (const d of JSON.parse(devStr)) this.devices.set(d.id, d); } catch {} }
   }
 
   async persist() {
