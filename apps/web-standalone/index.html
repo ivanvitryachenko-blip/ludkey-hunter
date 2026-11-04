@@ -1095,10 +1095,16 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 let connCred = null, connServer = "", connChunkIdx = null, serverStatus = null, connUseGpu = false;
 let connScanned = 0, connLastScanned = 0, connLastT = 0;
 function connBase(){ let u = ($("server-url").value || "").trim(); if(!u) u = location.origin; return u.replace(/\/+$/,""); }
-async function connApi(path, method, body){
-  const r = await fetch(connServer + path, { method, headers: { "content-type":"application/json", ...(connCred?{authorization:"Bearer "+connCred.token}:{}) }, body: body?JSON.stringify(body):undefined });
-  if(!r.ok) throw new Error(path+" -> "+r.status);
-  return r.json();
+async function connApi(path, method, body, tries=3){
+  let lastErr;
+  for(let i=0;i<tries;i++){
+    try{
+      const r = await fetch(connServer + path, { method, headers: { "content-type":"application/json", ...(connCred?{authorization:"Bearer "+connCred.token}:{}) }, body: body?JSON.stringify(body):undefined });
+      if(!r.ok) throw new Error(path+" -> "+r.status);
+      return await r.json();
+    }catch(e){ lastErr=e; if(i<tries-1) await sleep(300*(i+1)); }
+  }
+  throw lastErr;
 }
 async function connRegister(){
   const key = "ludkey.cred."+connServer;
@@ -1182,8 +1188,11 @@ async function startConnected(){
   $("conn-status").textContent = "Connecting to "+connServer+" …";
   try{ await connRegister(); }
   catch(e){ $("conn-status").textContent = "Could not reach coordinator: "+e.message; logEvent("crit","Coordinator registration failed: "+e.message); return false; }
-  let info; try{ info = await (await fetch(connServer+"/api/info")).json(); }catch(e){ $("conn-status").textContent="Coordinator /api/info failed"; return false; }
-  const target = info.hash160;
+  // /api/info is only informational — the app already knows the puzzle target,
+  // so a flaky info call must NOT block the search. Best-effort, with fallback.
+  let info = null; try{ info = await (await fetch(connServer+"/api/info")).json(); }catch(_){ }
+  const target = (info && info.hash160) || PUZZLE.h160;
+  const puzNum = (info && info.puzzle) || PUZZLE.number;
   // Use the GPU (WebGPU) when the chosen backend allows and it passes self-test
   // — the big speed-up vs CPU. Falls back to CPU otherwise.
   const backendSel = $("backend").value;
@@ -1198,7 +1207,7 @@ async function startConnected(){
   for(let i=0;i<nWorkers;i++) pool.push({ id:i, conn:true, worker:null, gpu:connUseGpu, status:"running", speed:0, scanned:0, base:0, subStart:0n, subEnd:0n, cursor:0n, chunkIndex:null, last:performance.now(), lastScanned:0 });
   resetAggregate("connected", connServer, "");
   setControls();
-  $("conn-status").textContent = "Connected as "+connCred.id+" — "+nWorkers+(connUseGpu?" GPU":" CPU")+" worker(s), 1 segment each, #"+info.puzzle;
+  $("conn-status").textContent = "Connected as "+connCred.id+" — "+nWorkers+(connUseGpu?" GPU":" CPU")+" worker(s), 1 segment each, #"+puzNum;
   logEvent("good","Connected to "+connServer+" as "+connCred.id+" — "+nWorkers+" worker(s), 1 segment each"+(connUseGpu?" (GPU)":""));
   connActive = nWorkers;
   connHeartbeat(); connStatusPoll();
