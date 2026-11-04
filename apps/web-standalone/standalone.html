@@ -712,7 +712,7 @@ fn subMod(a: array<u32,16>, b: array<u32,16>) -> array<u32,16> {
 }
 fn reduce(t_in: array<u32,32>) -> array<u32,16> {
   var t = t_in;
-  for (var pass=0; pass<3; pass=pass+1) {
+  for (var rp=0; rp<3; rp=rp+1) {
     var c: array<u32,16>;
     for (var i=0;i<16;i=i+1){ c[i] = t[16+i]; t[16+i] = 0u; }
     var carry: u32 = 0u;
@@ -916,22 +916,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   let xy = scalarMulG(key);
   // compressed pubkey bytes: prefix + big-endian x (x is limbs 0..15, little-endian 16-bit)
-  var pub: array<u32,64>;
-  for (var i=0;i<64;i=i+1){ pub[i] = 0u; }
+  var pk: array<u32,64>;
+  for (var i=0;i<64;i=i+1){ pk[i] = 0u; }
   // y parity from y limb 0
-  pub[0] = select(0x02u, 0x03u, (xy[16] & 1u) == 1u);
+  pk[0] = select(0x02u, 0x03u, (xy[16] & 1u) == 1u);
   // x big-endian: most significant limb is x[15]
   for (var i=0;i<16;i=i+1){
     let limb = xy[15 - i];           // 16-bit
-    pub[1 + i*2]     = (limb >> 8u) & 0xffu;
-    pub[1 + i*2 + 1] = limb & 0xffu;
+    pk[1 + i*2]     = (limb >> 8u) & 0xffu;
+    pk[1 + i*2 + 1] = limb & 0xffu;
   }
-  let sh = sha256_33(pub);
+  let sh = sha256_33(pk);
   let h = ripemd160(sh);
   // compare against target (params[16..20] are hash160 as 5 little-endian 32-bit words)
-  var match = true;
-  for (var i=0;i<5;i=i+1){ if (h[i] != params[16 + i]) { match = false; } }
-  if (match) {
+  var matched = true;
+  for (var i=0;i<5;i=i+1){ if (h[i] != params[16 + i]) { matched = false; } }
+  if (matched) {
     atomicStore(&result[0], 1u);
     atomicStore(&result[1], tid);
   }
