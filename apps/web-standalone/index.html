@@ -1108,30 +1108,41 @@ async function connRegister(){
   const j = await r.json(); connCred = { id:j.deviceId, token:j.token };
   try{ localStorage.setItem(key, JSON.stringify(connCred)); }catch(_){}
 }
-// Dispatch a leased chunk to the GPU (fast) when available, else CPU workers.
-function connScanChunk(s, e, target){
-  if(connUseGpu && gpuEngine && gpuEngine.ok) return connScanChunkGpu(s, e, target);
-  return connScanChunkCpu(s, e, target);
+// "1 worker = 1 segment": each lease loop owns a whole segment. These scan one
+// segment [s,e] for a single entry and resolve on full scan / match / stop.
+function connScanSegmentCpu(entry, s, e, target){
+  return new Promise((resolve)=>{
+    const windowSize = Math.max(64, Math.min(8192, parseInt($("window").value)||1024));
+    const w = new Worker(workerBlobUrl);
+    entry.worker = w;
+    let settled = false;
+    const done = (r)=>{ if(settled) return; settled=true; clearInterval(chk); try{w.terminate();}catch(_){} entry.worker=null; resolve(r); };
+    const chk = setInterval(()=>{ if(!running) done({stopped:true}); }, 200);
+    w.onmessage = (ev)=>{ const m=ev.data;
+      if(m.type==="progress"){ entry.cursor=BigInt(m.cursor); entry.scanned=entry.base+m.scanned;
+        const now=performance.now(), dt=(now-entry.last)/1000; if(dt>=0.3){ const d=entry.scanned-entry.lastScanned; entry.speed=d>0?d/dt:0; entry.last=now; entry.lastScanned=entry.scanned; } }
+      else if(m.type==="done"){ entry.speed=0; done({done:true}); }
+      else if(m.type==="found"){ done({found:true, key:m.key, h160:m.h160}); }
+    };
+    w.postMessage({ type:"start", id:entry.id, start:"0x"+s.toString(16), end:"0x"+e.toString(16), target, windowSize, compressed:true });
+  });
 }
-// Scan one leased chunk on the GPU (WebGPU). Resolves on full scan or match.
-function connScanChunkGpu(s, e, target){
+function connScanSegmentGpu(entry, s, e, target){
   const targetBytes = hexToBytes(target);
   return new Promise(async (resolve)=>{
-    const entry = { worker:null, id:0, scanned:0, speed:0, last:performance.now(), lastScanned:0, status:"running", subStart:s, subEnd:e, cursor:s, conn:true, gpu:true };
-    pool = [entry];
-    let BATCH = 8192; // adapts toward ~250ms/dispatch
+    let BATCH=8192, segScanned=0;
     while(running){
       if(paused){ await sleep(120); continue; }
-      if(entry.cursor > e){ entry.status="done"; entry.speed=0; resolve({done:true}); return; }
+      if(entry.cursor > e){ entry.speed=0; resolve({done:true}); return; }
       const remaining = e - entry.cursor + 1n;
       const n = remaining < BigInt(BATCH) ? Number(remaining) : BATCH;
       const t0 = performance.now();
       let res;
       try{ res = await gpuEngine.searchBatch(entry.cursor, targetBytes, n); }
-      catch(err){ logEvent("crit","GPU batch failed: "+err.message+" — falling back to CPU for this chunk"); connUseGpu=false; return resolve(await connScanChunkCpu(s, e, target)); }
+      catch(err){ logEvent("crit","GPU batch failed: "+err.message+" — CPU fallback for this segment"); connUseGpu=false; return resolve(await connScanSegmentCpu(entry, entry.cursor, e, target)); }
       if(!running){ resolve({stopped:true}); return; }
       const dt = (performance.now()-t0)/1000;
-      entry.scanned += n; entry.cursor += BigInt(n); entry.speed = dt>0 ? n/dt : 0;
+      segScanned += n; entry.cursor += BigInt(n); entry.scanned = entry.base + segScanned; entry.speed = dt>0 ? n/dt : 0;
       if(dt < 0.15) BATCH = Math.min(1<<20, BATCH*2); else if(dt > 0.5) BATCH = Math.max(256, (BATCH/2)|0);
       if(res.found){ const h160 = ecHash160Compressed(res.key); resolve({found:true, key:"0x"+res.key.toString(16), h160}); return; }
       await sleep(0);
@@ -1139,52 +1150,33 @@ function connScanChunkGpu(s, e, target){
     resolve({stopped:true});
   });
 }
-// Scan one leased chunk with N CPU workers; resolve on full scan or match.
-function connScanChunkCpu(s, e, target){
-  return new Promise((resolve)=>{
-    const workers = Math.max(1, Math.min(32, parseInt($("workers").value)||2));
-    const windowSize = Math.max(64, Math.min(8192, parseInt($("window").value)||1024));
-    const ranges = splitRange(s, e, workers);
-    let doneN = 0, settled = false;
-    pool = ranges.map((r,i)=>{
-      const w = new Worker(workerBlobUrl);
-      const entry = { worker:w, id:i, scanned:0, speed:0, last:performance.now(), lastScanned:0, status:"running", subStart:r[0], subEnd:r[1], cursor:r[0], conn:true };
-      w.onmessage = (ev)=>{ const m=ev.data;
-        if(m.type==="progress"){ entry.scanned=m.scanned; entry.cursor=BigInt(m.cursor); const now=performance.now(), dt=(now-entry.last)/1000; if(dt>=0.3){ const d=m.scanned-entry.lastScanned; entry.speed=d>0?d/dt:0; entry.last=now; entry.lastScanned=m.scanned; } if(m.done) entry.status="done"; }
-        else if(m.type==="done"){ entry.status="done"; entry.speed=0; doneN++; if(doneN===ranges.length && !settled){ settled=true; resolve({done:true}); } }
-        else if(m.type==="found"){ entry.status="found"; if(!settled){ settled=true; resolve({found:true, key:m.key, h160:m.h160}); } }
-      };
-      w.postMessage({ type:"start", id:i, start:"0x"+r[0].toString(16), end:"0x"+r[1].toString(16), target, windowSize, compressed:true });
-      return entry;
-    });
-  });
-}
 function connKillWorkers(){ pool.forEach(p=>{ try{ p.worker.postMessage({type:"stop"}); p.worker.terminate(); }catch(_){} }); }
-async function connLoop(target){
+let connActive = 0; // how many worker-loops are still leasing
+// One independent loop per worker: lease a RANDOM segment, scan it whole,
+// complete it, repeat. N of these run in parallel (one per CPU worker).
+async function connWorkerLoop(entry, target){
   while(running){
     if(paused){ await sleep(150); continue; }
     let lease;
     try{ lease = await connApi("/api/lease","POST",{}); }
-    catch(e){ logEvent("crit","Coordinator unreachable: "+e.message); finish("coordinator unreachable"); return; }
-    if(!lease.chunk){ logEvent("info","Coordinator: all work assigned/done"); finish("no more work from coordinator"); return; }
-    connChunkIdx = lease.chunk.index;
+    catch(e){ entry.status="stopped"; entry.speed=0; if(--connActive<=0){ logEvent("crit","Coordinator unreachable: "+e.message); finish("coordinator unreachable"); } return; }
+    if(!lease.chunk){ entry.status="done"; entry.speed=0; if(--connActive<=0){ logEvent("info","Coordinator: all work assigned/done"); finish("no more work from coordinator"); } return; }
+    entry.chunkIndex = lease.chunk.index;
     const s = BigInt(lease.chunk.start), e = BigInt(lease.chunk.end);
-    logEvent("info","Leased chunk #"+connChunkIdx+" from coordinator");
-    const res = await connScanChunk(s, e, target);
-    connKillWorkers();
-    if(!running){ try{ await connApi("/api/release","POST",{chunkIndex:connChunkIdx}); }catch(_){} return; }
+    entry.subStart=s; entry.subEnd=e; entry.cursor=s; entry.status="running"; entry.last=performance.now(); entry.lastScanned=entry.scanned;
+    const res = connUseGpu ? await connScanSegmentGpu(entry, s, e, target) : await connScanSegmentCpu(entry, s, e, target);
+    if(!running){ try{ await connApi("/api/release","POST",{chunkIndex:entry.chunkIndex}); }catch(_){} return; }
     if(res.found){
       const h160 = res.h160, addr = b58check(h160); matches++;
       logEvent("hit","*** MATCH (shared) — key "+res.key+" → "+addr+" ***");
       try{ await connApi("/api/match","POST",{ key:res.key, hash160:h160, address:addr }); }catch(_){}
       showMatch(res.key, h160, addr); stopAll("match found"); return;
     }
-    try{ await connApi("/api/complete","POST",{chunkIndex:connChunkIdx}); }catch(_){}
-    connScanned += Number(e - s + 1n);
-    connChunkIdx = null;
+    try{ await connApi("/api/complete","POST",{chunkIndex:entry.chunkIndex}); }catch(_){}
+    entry.base += Number(e - s + 1n); entry.scanned = entry.base; entry.chunkIndex = null;
   }
 }
-function connCumulative(){ let cur=0; for(const p of pool){ if(p.conn) cur += Number(p.cursor - p.subStart); } return connScanned + cur; }
+function connCumulative(){ let t=0; for(const p of pool){ if(p.conn) t += (p.scanned||0); } return t; }
 async function startConnected(){
   connServer = connBase();
   $("conn-status").textContent = "Connecting to "+connServer+" …";
@@ -1193,19 +1185,24 @@ async function startConnected(){
   let info; try{ info = await (await fetch(connServer+"/api/info")).json(); }catch(e){ $("conn-status").textContent="Coordinator /api/info failed"; return false; }
   const target = info.hash160;
   // Use the GPU (WebGPU) when the chosen backend allows and it passes self-test
-  // — this is the big speed-up vs CPU-only. Falls back to CPU otherwise.
+  // — the big speed-up vs CPU. Falls back to CPU otherwise.
   const backendSel = $("backend").value;
   connUseGpu = (backendSel==="auto" || backendSel==="gpu" || backendSel==="hybrid") && await ensureGpu();
-  backendLabel = connUseGpu ? "Connected (GPU)" : "Connected (CPU)";
+  // One worker = one segment. CPU: N parallel workers, each scanning its own
+  // full segment. GPU: a single unit scans one segment at a time (splitting a
+  // single GPU gives no gain), so one loop.
+  const nWorkers = connUseGpu ? 1 : Math.max(1, Math.min(32, parseInt($("workers").value)||2));
+  backendLabel = connUseGpu ? "Connected (GPU)" : ("Connected (CPU ×"+nWorkers+")");
   connScanned = 0; connLastScanned = 0;
-  const entry = { id:0, scanned:0, speed:0, status:"running", subStart:0n, subEnd:0n, cursor:0n }; // placeholder; replaced per chunk
-  pool = [entry];
+  pool = [];
+  for(let i=0;i<nWorkers;i++) pool.push({ id:i, conn:true, worker:null, gpu:connUseGpu, status:"running", speed:0, scanned:0, base:0, subStart:0n, subEnd:0n, cursor:0n, chunkIndex:null, last:performance.now(), lastScanned:0 });
   resetAggregate("connected", connServer, "");
   setControls();
-  $("conn-status").textContent = "Connected as "+connCred.id+" — searching shared #"+info.puzzle;
-  logEvent("good","Connected to coordinator "+connServer+" as "+connCred.id);
+  $("conn-status").textContent = "Connected as "+connCred.id+" — "+nWorkers+(connUseGpu?" GPU":" CPU")+" worker(s), 1 segment each, #"+info.puzzle;
+  logEvent("good","Connected to "+connServer+" as "+connCred.id+" — "+nWorkers+" worker(s), 1 segment each"+(connUseGpu?" (GPU)":""));
+  connActive = nWorkers;
   connHeartbeat(); connStatusPoll();
-  connLoop(target);
+  for(const entry of pool) connWorkerLoop(entry, target);
   return true;
 }
 let connHbTimer=null, connStTimer=null;
@@ -1217,7 +1214,9 @@ function connHeartbeat(){
     const cum = connCumulative(); const now = performance.now(); const dt = (now-connLastT)/1000;
     const spd = dt>0 ? Math.max(0, (cum - connLastScanned)/dt) : 0;
     connLastScanned = cum; connLastT = now;
-    try{ await connApi("/api/heartbeat","POST",{ speed:Math.round(spd), scanned:String(cum), chunkIndex:connChunkIdx!=null?connChunkIdx:undefined, chunkScanned:String(cum) }); }catch(_){}
+    try{ await connApi("/api/heartbeat","POST",{ speed:Math.round(spd), scanned:String(cum) }); }catch(_){}
+    // keep every in-flight segment's lease alive (one per active worker)
+    for(const p of pool){ if(p.chunkIndex!=null){ try{ await connApi("/api/heartbeat","POST",{ chunkIndex:p.chunkIndex }); }catch(_){} } }
   }, 4000);
 }
 function connStatusPoll(){
