@@ -170,6 +170,7 @@
   #randomBox { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
   #randomBox[hidden] { display: none; }
   #connectedBox[hidden] { display: none !important; }
+  #sharedBox[hidden] { display: none !important; }
 
   canvas { display: block; width: 100%; height: auto; background: var(--surface-2); border-radius: 8px; }
 
@@ -279,7 +280,8 @@
                 <select id="mode">
                   <option value="puzzle">Puzzle #71 — sequential (resumes where it left off)</option>
                   <option value="random">Puzzle #71 — random, no-repeat (saves covered segments)</option>
-                  <option value="connected">Connected — shared search across ALL your devices</option>
+                  <option value="shared">Shared via Claude — all devices together, NO server</option>
+                  <option value="connected">Connected — shared via your own coordinator server</option>
                   <option value="demo">Demo (hide &amp; find a known key)</option>
                 </select>
               </label>
@@ -300,6 +302,10 @@
                 </select>
               </label>
               <label class="switch"><input type="checkbox" id="compressed" checked> Compressed public key (puzzle default)</label>
+              <div id="sharedBox" hidden style="display:flex; flex-direction:column; gap:8px; border:1px solid var(--accent-dim); border-radius:8px; padding:10px;">
+                <p class="hint">Все устройства, открывшие <b>эту ссылку артефакта Claude</b> (под вашим аккаунтом), ищут вместе: пройденные сегменты и общий прогресс/скорость хранятся в общей базе Claude — <b>сервер не нужен</b>. Работает по ссылке артефакта, не на статическом сайте. Откройте артефакт на телефоне и компьютерах и нажмите Start.</p>
+                <span class="hint" id="shared-status">Not connected to shared store.</span>
+              </div>
               <div id="connectedBox" hidden style="display:flex; flex-direction:column; gap:8px; border:1px solid var(--accent-dim); border-radius:8px; padding:10px;">
                 <label class="field">Coordinator server URL
                   <input type="text" id="server-url" placeholder="https://your-coordinator.example  (leave blank if this page is served by it)">
@@ -1153,6 +1159,87 @@ function connStatusPoll(){
   poll(); connStTimer = setInterval(poll, 5000);
 }
 
+/* ---------------- Shared mode via Claude artifact db (NO server) ---------------- */
+let sharedDb=null, sharedDone=new Set(), sharedDevices=[], sharedUnsub=[], myDevId=null, sharedScanned=0, sharedHbTimer=null;
+function getLocalDevId(){ try{ let id=localStorage.getItem("ludkey.devid"); if(!id){ id="dev-"+Math.random().toString(16).slice(2,10); localStorage.setItem("ludkey.devid",id); } return id; }catch(_){ return "dev-"+Math.random().toString(16).slice(2,10); } }
+function pickSharedUndone(){
+  const total = chunkCount();
+  for(let tries=0; tries<80; tries++){
+    const bytes=new Uint8Array(9); crypto.getRandomValues(bytes);
+    let r=0n; for(const b of bytes) r=(r<<8n)|BigInt(b);
+    const idx = r % total; const k=idx.toString();
+    if(!sharedDone.has(k) && !activeChunks.has(k)) return idx;
+  }
+  return null;
+}
+async function startShared(){
+  chunkBits = Math.max(16, Math.min(40, parseInt($("chunkbits")?.value)||24));
+  if(!(window.claude && window.claude.use)){
+    logEvent("warn","Общий режим работает только по ссылке артефакта Claude (здесь статический сайт). Запускаю локальный random.");
+    $("shared-status").textContent = "Shared store unavailable here — use the Claude artifact link. Running local random instead.";
+    currentMode="random"; return startRandomLocal();
+  }
+  $("shared-status").textContent = "Подключаюсь к общей базе Claude…";
+  let db=null, userCap=null;
+  try{ db = await claude.use("db"); userCap = await claude.use("user"); }catch(e){}
+  if(!db){ logEvent("warn","Общая база недоступна (войдите в Claude). Локальный random."); $("shared-status").textContent="Shared store unavailable (sign in to Claude). Running local random."; currentMode="random"; return startRandomLocal(); }
+  sharedDb = db;
+  myDevId = (userCap && (await userCap.id())) || getLocalDevId();
+  const dtype = deviceType();
+  try{ await sharedDb.doc("devices/"+myDevId).set({ name:dtype+"-"+myDevId.slice(-4), type:dtype, speed:0, scanned:0, lastSeen:Date.now() }); }catch(e){ logEvent("crit","Не могу писать в общую базу: "+(e.code||e.message)); $("shared-status").textContent="No write access to the shared store."; return; }
+  // subscriptions
+  try{
+    sharedUnsub.push(sharedDb.collection("segments").onSnapshot(snap=>{ const s=new Set(); snap.docs.forEach(d=>s.add(d.id)); sharedDone=s; }, err=>logEvent("warn","segments sub: "+err.code)));
+    sharedUnsub.push(sharedDb.collection("devices").onSnapshot(snap=>{ sharedDevices=snap.docs.map(d=>({id:d.id, ...(d.data()||{})})); }, err=>logEvent("warn","devices sub: "+err.code)));
+  }catch(e){ logEvent("warn","subscribe failed: "+(e.code||e.message)); }
+  backendLabel="Shared (Claude)"; sharedScanned=0;
+  const entry={ id:0, scanned:0, speed:0, status:"running", subStart:0n, subEnd:0n, cursor:0n };
+  pool=[entry]; resetAggregate("shared","shared","shared"); setControls();
+  $("shared-status").textContent = "В общем поиске как "+myDevId.slice(-6)+" · сегмент 2^"+chunkBits;
+  logEvent("good","Общий режим (Claude) запущен как "+myDevId.slice(-6)+", сегментов уже покрыто: "+sharedDone.size);
+  sharedHeartbeat();
+  sharedLoop(PUZZLE.h160);
+  return true;
+}
+async function sharedLoop(targetHex){
+  while(running){
+    if(paused){ await sleep(150); continue; }
+    const idx = pickSharedUndone();
+    if(idx===null){ await sleep(1500); continue; }
+    activeChunks.add(idx.toString());
+    const [s,e]=chunkBounds(idx);
+    const res = await connScanChunk(s, e, targetHex);
+    connKillWorkers();
+    activeChunks.delete(idx.toString());
+    if(!running) return;
+    if(res.found){ const h160=res.h160, addr=b58check(h160); matches++; logEvent("hit","*** MATCH (shared) — key "+res.key+" → "+addr+" ***"); showMatch(res.key,h160,addr); stopAll("match found"); return; }
+    try{ await sharedDb.doc("segments/"+idx.toString()).set({ by:myDevId, at:Date.now() }); sharedDone.add(idx.toString()); }catch(e){ if(e&&e.code==="quota_exceeded") logEvent("warn","Общая база заполнена (лимит сегментов)"); }
+    sharedScanned += Number(e - s + 1n);
+  }
+}
+function sharedHeartbeat(){
+  clearInterval(sharedHbTimer);
+  sharedHbTimer = setInterval(async ()=>{
+    if(!running){ clearInterval(sharedHbTimer); return; }
+    const t = totals(); const sc = sharedScanned + (pool[0]? Number(pool.reduce((a,p)=>a+(p.conn?(p.cursor-p.subStart):0n),0n)) : 0);
+    try{ await sharedDb.doc("devices/"+myDevId).update({ speed:Math.round(t.speed), scanned:sc, lastSeen:Date.now() }); }
+    catch(_){ try{ await sharedDb.doc("devices/"+myDevId).set({ name:deviceType(), type:deviceType(), speed:Math.round(t.speed), scanned:sc, lastSeen:Date.now() }); }catch(__){} }
+  }, 5000);
+}
+function sharedCleanup(){ clearInterval(sharedHbTimer); sharedUnsub.forEach(u=>{ try{u();}catch(_){} }); sharedUnsub=[]; }
+function bytesToHexLocal(b){ let s=""; for(let i=0;i<b.length;i++) s+=b[i].toString(16).padStart(2,"0"); return s; }
+// local random fallback (used when shared store isn't available)
+function startRandomLocal(){
+  const workers=Math.max(1,Math.min(32,parseInt($("workers").value)||2));
+  const windowSize=Math.max(64,Math.min(8192,parseInt($("window").value)||1024));
+  const compressed=$("compressed").checked;
+  pool=[]; for(let i=0;i<workers;i++){ const w=new Worker(workerBlobUrl); const entry={worker:w,id:i,scanned:0,speed:0,last:performance.now(),lastScanned:0,status:"running",subStart:0n,subEnd:0n,cursor:0n,chunkIndex:null,windowSize,compressed}; w.onmessage=(e)=>onWorkerMsg(entry,e.data); pool.push(entry); assignRandomChunk(entry); }
+  running=true; paused=false; sessionStart=performance.now(); maxSpeed=0; speedHistory.length=0; lastAggT=performance.now(); lastAggScanned=0;
+  this_sessionMeta={mode:"random",start:"random",end:"random",when:new Date().toISOString()}; setControls();
+  logEvent("info","Локальный random — "+doneChunks.size+" сегментов уже покрыто, сегмент=2^"+chunkBits);
+  return true;
+}
+
 // Try to start the search on the GPU. Returns true if it took over, false to
 // fall back to CPU. Only sequential/demo ranges (not random mode) for now.
 async function ensureGpu(){
@@ -1383,6 +1470,9 @@ async function startSearch(){
   const mode = $("mode").value; currentMode = mode;
   const backend = $("backend") ? $("backend").value : "cpu";
 
+  // --- SHARED mode: all devices on this Claude artifact share one search (no server) ---
+  if(mode==="shared"){ await startShared(); return; }
+
   // --- CONNECTED mode: shared search coordinated by a server ---
   if(mode==="connected"){ await startConnected(); return; }
 
@@ -1581,7 +1671,7 @@ function setControls(){
 function pauseAll(){ if(!running||paused) return; paused=true; pool.forEach(p=>{ if(p.status==="running"){ if(p.worker) p.worker.postMessage({type:"pause"}); p.status="paused"; p.speed=0; } }); setControls(); logEvent("warn","Paused"); }
 function resumeAll(){ if(!running||!paused) return; paused=false; pool.forEach(p=>{ if(p.status==="paused"){ if(p.worker) p.worker.postMessage({type:"resume"}); p.status="running"; p.last=performance.now(); } }); setControls(); logEvent("info","Resumed"); }
 function stopAll(reason){ pool.forEach(p=>{ try{p.worker.postMessage({type:"stop"}); p.worker.terminate();}catch(e){} if(p.status!=="found") p.status="stopped"; p.speed=0; }); activeChunks.clear(); finish(reason||"stopped"); }
-function finish(reason){ if(!running) return; running=false; paused=false; try{clearInterval(connHbTimer);}catch(_){} try{clearInterval(connStTimer);}catch(_){} setControls(); if(this_sessionMeta) saveSession(reason); logEvent(reason&&reason.indexOf("match")>=0?"hit":"info","Stopped: "+reason); $("s-progresstext").textContent="Stopped: "+reason; }
+function finish(reason){ if(!running) return; running=false; paused=false; try{clearInterval(connHbTimer);}catch(_){} try{clearInterval(connStTimer);}catch(_){} try{sharedCleanup();}catch(_){} setControls(); if(this_sessionMeta) saveSession(reason); logEvent(reason&&reason.indexOf("match")>=0?"hit":"info","Stopped: "+reason); $("s-progresstext").textContent="Stopped: "+reason; }
 function resetSearch(){ stopAll("reset"); pool=[]; totals(); logEvent("info","Reset"); }
 
 /* ---------------- aggregation + render loop ---------------- */
@@ -1679,6 +1769,22 @@ function renderFrame(){
     // devices table
     const tb=$("dev-rows");
     tb.innerHTML = serverStatus.devices.map(d=>"<tr><td>"+(d.name||d.id)+(d.id===(connCred&&connCred.id)?" (this)":"")+"</td><td>"+(d.type||"?")+"</td><td>—</td><td>—</td><td><span class='chip "+(d.online?"good":"")+"'>"+(d.online?"online":"offline")+"</span></td><td>"+fmtSpeed(d.speed||0)+"</td><td>"+(d.online?"searching":"idle")+"</td></tr>").join("");
+  }
+
+  // Shared mode (Claude db): combine progress + speed across all devices.
+  if(currentMode==="shared" && sharedDb){
+    const now=Date.now();
+    const online = sharedDevices.filter(d=>now-(d.lastSeen||0)<60000);
+    const totalSpeed = online.reduce((a,d)=>a+(d.speed||0),0);
+    const coveredK = sharedDone.size * Math.pow(2, chunkBits);
+    const pct = coveredK / Math.pow(2,70) * 100;
+    $("d-speed").innerHTML = fmtSpeedParts(totalSpeed);
+    $("d-devices").textContent = online.length || 1;
+    $("d-backend").textContent = "shared via Claude";
+    $("d-scanned").textContent = fmtNum(coveredK);
+    $("d-progress").textContent = fmtTinyPct(pct);
+    const tb=$("dev-rows");
+    tb.innerHTML = (online.length?online:[{id:myDevId,type:deviceType(),speed:0}]).map(d=>"<tr><td>"+(d.name||d.id)+(d.id===myDevId?" (this)":"")+"</td><td>"+(d.type||"?")+"</td><td>—</td><td>—</td><td><span class='chip good'>online</span></td><td>"+fmtSpeed(d.speed||0)+"</td><td>searching</td></tr>").join("");
   }
 
   // feasibility note (only when not showing a match)
@@ -1850,12 +1956,14 @@ $("btn-resume").addEventListener("click", resumeAll);
 $("btn-stop").addEventListener("click", ()=>stopAll("stopped by user"));
 $("btn-reset").addEventListener("click", resetSearch);
 $("btn-save").addEventListener("click", ()=>{ if(this_sessionMeta){ saveSession("saved checkpoint"); logEvent("info","Session saved to history"); } else logEvent("warn","Nothing running to save"); });
-$("mode").addEventListener("change", ()=>{ const m=$("mode").value; const demo=m==="demo", rnd=m==="random", conn=m==="connected";
-  $("rstart").disabled = demo||rnd||conn; $("rend").disabled = demo||rnd||conn;
+$("mode").addEventListener("change", ()=>{ const m=$("mode").value; const demo=m==="demo", rnd=m==="random", conn=m==="connected", shr=m==="shared";
+  $("rstart").disabled = demo||rnd||conn||shr; $("rend").disabled = demo||rnd||conn||shr;
   $("randomBox").hidden = !rnd;
   $("connectedBox").hidden = !conn;
+  $("sharedBox").hidden = !shr;
   $("searchHint").textContent = demo? "Demo mode hides a known key in a small window so you can watch a real match."
     : rnd? "Random no-repeat: picks random 2^N-key segments of #71, remembers finished ones (saved in this browser), and never re-scans them."
+    : shr? "Shared via Claude: all devices on this artifact link search together over a shared segment map — no server to run."
     : conn? "Connected: this device joins a shared search run by your coordinator server — every device gets a different chunk, progress is combined."
     : "Sequential: scans #71 in order and resumes from where it left off after a reload."; });
 $("btn-clear-covered").addEventListener("click", ()=>{ if(running){ logEvent("warn","Stop the search before clearing covered history"); return; } doneChunks=new Set(); saveDone(); $("coveredText").textContent="Covered: 0 segments"; logEvent("info","Covered-segments history cleared"); });
