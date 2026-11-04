@@ -424,44 +424,78 @@ func (c *Coord) getJSON(path string, out any) error {
 // ---------------------------------------------------------------------------
 type scanState struct {
 	target  [20]byte
-	table   []Pt
+	table   []ptF
 	window  int
 	scanned *uint64 // shared counter
 	stop    *atomic.Bool
+	// per-worker scratch (reused every window -> zero allocation in steady state)
+	dxs  []fe
+	pre  []fe
+	invs []fe
 }
 
 func scanSegment(start, end *big.Int, st *scanState) (*big.Int, [20]byte, bool) {
 	cursor := new(big.Int).Set(start)
 	one := big.NewInt(1)
-	var base Pt
+	wBig := big.NewInt(int64(st.window))
+	remaining := new(big.Int)
+	var base ptF
 	haveBase := false
 	for cursor.Cmp(end) <= 0 {
 		if st.stop.Load() {
 			return nil, [20]byte{}, false
 		}
 		if !haveBase {
-			base = scalarMulG(cursor)
+			base = scalarMulGF(cursor)
 			haveBase = true
 		}
-		remaining := new(big.Int).Sub(end, cursor)
+		remaining.Sub(end, cursor)
 		remaining.Add(remaining, one)
 		n := st.window
-		if remaining.Cmp(big.NewInt(int64(st.window))) < 0 {
+		if remaining.Cmp(wBig) < 0 {
 			n = int(remaining.Int64())
 		}
 		// check base (cursor)
-		if h := hash160(compressed(base)); h == st.target {
+		if h := hash160Fast(base); h == st.target {
 			return new(big.Int).Set(cursor), h, true
 		}
 		if n > 1 {
-			pts := batchAddDeltas(base, st.table[:n-1])
-			for i := 0; i < len(pts); i++ {
-				if h := hash160(compressed(pts[i])); h == st.target {
+			m := n - 1
+			// batch inverse of (table[i].X - base.X), reusing scratch buffers
+			for i := 0; i < m; i++ {
+				dx := feSub(st.table[i].X, base.X)
+				if dx.isZero() {
+					dx = feOne
+				}
+				st.dxs[i] = dx
+			}
+			acc := feOne
+			for i := 0; i < m; i++ {
+				st.pre[i] = acc
+				acc = feMul(acc, st.dxs[i])
+			}
+			inv := feInv(acc)
+			for i := m - 1; i >= 0; i-- {
+				st.invs[i] = feMul(st.pre[i], inv)
+				inv = feMul(inv, st.dxs[i])
+			}
+			// base + table[i], hash160, compare — no allocation per key
+			for i := 0; i < m; i++ {
+				d := st.table[i]
+				var pt ptF
+				if feSub(d.X, base.X).isZero() {
+					pt = affineAddF(base, d)
+				} else {
+					s := feMul(feSub(d.Y, base.Y), st.invs[i])
+					pt.X = feSub(feSub(feSqr(s), base.X), d.X)
+					pt.Y = feSub(feMul(s, feSub(base.X, pt.X)), base.Y)
+				}
+				if h := hash160Fast(pt); h == st.target {
 					k := new(big.Int).Add(cursor, big.NewInt(int64(i+1)))
 					return k, h, true
 				}
 			}
-			base = affineAdd(base, st.table[n-1])
+			base = affineAddF(base, st.table[n-1])
 		} else {
 			haveBase = false
 		}
@@ -476,11 +510,12 @@ func scanSegment(start, end *big.Int, st *scanState) (*big.Int, [20]byte, bool) 
 // ---------------------------------------------------------------------------
 func selfTest() bool {
 	// (key, hash160 of compressed pubkey) pairs, verified against the browser engine.
-	k1 := hash160(compressed(scalarMulG(big.NewInt(1))))
+	// Uses the fast path so it validates the whole uint64 field + EC + hash.
+	k1 := hash160Fast(scalarMulGF(big.NewInt(1)))
 	want1, _ := hex.DecodeString("751e76e8199196d454941c45d1b3a323f1433bd6")
-	k21 := hash160(compressed(scalarMulG(big.NewInt(0x15))))
+	k21 := hash160Fast(scalarMulGF(big.NewInt(0x15)))
 	want21, _ := hex.DecodeString("8f9dff39a81ee4abcbad2ad8bafff090415a2be8")
-	k514 := hash160(compressed(scalarMulG(big.NewInt(0x202))))
+	k514 := hash160Fast(scalarMulGF(big.NewInt(0x202)))
 	want514, _ := hex.DecodeString("d7729816650e581d7462d52ad6f732da0e2ec93b")
 	return bytes.Equal(k1[:], want1) && bytes.Equal(k21[:], want21) && bytes.Equal(k514[:], want514)
 }
@@ -531,7 +566,7 @@ func main() {
 	coord.token = reg.Token
 	fmt.Printf("Registered as %s — starting search on %d cores\n\n", reg.DeviceID, *threads)
 
-	table := precompute(*window)
+	table := precomputeF(*window)
 	var scanned uint64
 	var stop atomic.Bool
 	var wg sync.WaitGroup
@@ -556,7 +591,8 @@ func main() {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			st := &scanState{target: target, table: table, window: *window, scanned: &scanned, stop: &stop}
+			st := &scanState{target: target, table: table, window: *window, scanned: &scanned, stop: &stop,
+				dxs: make([]fe, *window), pre: make([]fe, *window), invs: make([]fe, *window)}
 			for !stop.Load() {
 				var lease struct {
 					Chunk *struct {
