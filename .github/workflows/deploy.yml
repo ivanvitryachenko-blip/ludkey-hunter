@@ -1,0 +1,35 @@
+name: Deploy coordinator to Cloudflare
+
+# Deploys the Cloudflare Worker coordinator with `wrangler deploy`, which
+# publishes the new version at 100% traffic immediately (no gradual rollout) —
+# this is what makes a push actually take effect, unlike the dashboard's
+# git-build gradual deployments that left traffic on an old version.
+#
+# One-time setup: add a repository secret CLOUDFLARE_API_TOKEN
+# (Settings -> Secrets and variables -> Actions). Create the token in the
+# Cloudflare dashboard with the "Edit Cloudflare Workers" template.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/cloudflare/**"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Deploy with Wrangler
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: "410de824a279cbdd1c7ec89da1b45fc5"
+          workingDirectory: "packages/cloudflare"
+          wranglerVersion: "3.99.0"
+          command: deploy
