@@ -1228,7 +1228,9 @@ async function startConnected(){
   for(let i=0;i<nWorkers;i++) pool.push({ id:i, conn:true, worker:null, gpu:connUseGpu, status:"running", speed:0, scanned:0, base:0, subStart:0n, subEnd:0n, cursor:0n, chunkIndex:null, last:performance.now(), lastScanned:0 });
   resetAggregate("connected", connServer, "");
   setControls();
-  $("conn-status").textContent = "Connected as "+connCred.id+" — "+nWorkers+(connUseGpu?" GPU":" CPU")+" worker(s), 1 segment each, #"+puzNum;
+  const gpuWanted = (backendSel==="auto" || backendSel==="gpu" || backendSel==="hybrid");
+  $("conn-status").textContent = "Connected as "+connCred.id+" — "+nWorkers+(connUseGpu?" GPU":" CPU")+" worker(s), 1 segment each, #"+puzNum
+    + (gpuWanted && !connUseGpu ? "  ·  GPU off: "+gpuReason : "");
   logEvent("good","Connected to "+connServer+" as "+connCred.id+" — "+nWorkers+" worker(s), 1 segment each"+(connUseGpu?" (GPU)":""));
   connActive = nWorkers;
   connHeartbeat(); connStatusPoll();
@@ -1338,14 +1340,16 @@ function startRandomLocal(){
 
 // Try to start the search on the GPU. Returns true if it took over, false to
 // fall back to CPU. Only sequential/demo ranges (not random mode) for now.
+let gpuReason = "";
 async function ensureGpu(){
-  if(!window.WebGPUSearch) return false;
+  if(!window.WebGPUSearch){ gpuReason="window.WebGPUSearch missing"; return false; }
   if(!gpuEngine) gpuEngine = new window.WebGPUSearch();
   if(gpuEngine.ok) return true;
   logEvent("info","Initializing WebGPU and running the on-device self-test…");
+  gpuReason = ("gpu" in navigator) ? "" : "navigator.gpu missing (WebGPU off in this browser)";
   let st; try{ st = await gpuEngine.init(); }catch(e){ st={ok:false,reason:e.message}; }
-  if(!st.ok){ logEvent("warn","WebGPU not used ("+st.reason+") — running on CPU instead"); return false; }
-  logEvent("good","WebGPU self-test passed — GPU backend active");
+  if(!st.ok){ gpuReason = st.reason||gpuReason||"unknown"; logEvent("warn","WebGPU not used ("+gpuReason+") — running on CPU instead"); return false; }
+  gpuReason=""; logEvent("good","WebGPU self-test passed — GPU backend active ("+(gpuEngine.adapterInfo&&(gpuEngine.adapterInfo.vendor||gpuEngine.adapterInfo.architecture)||"gpu")+")");
   return true;
 }
 
