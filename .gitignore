@@ -9,3 +9,9 @@ FOUND_*.json
 agent-cred.json
 packages/agent-cuda/ludkey_cuda
 .DS_Store
+
+# Go agent build artifacts
+packages/agent-go/ludkey-agent
+packages/agent-go/ludkey-agent.exe
+packages/agent-go/*.exe
+packages/agent-go/FOUND_KEY.txt
