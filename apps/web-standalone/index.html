@@ -183,9 +183,28 @@
     }
     .brand { display: none; }
     .rail .spacer, .rail .foot { display: none; }
-    .navbtn { flex-direction: column; gap: 3px; font-size: 10.5px; padding: 7px 10px; white-space: nowrap; }
+    .navbtn { flex-direction: column; gap: 3px; font-size: 10.5px; padding: 8px 12px; white-space: nowrap; min-width: 56px; }
+    .navbtn .ic { font-size: 15px; }
     .navbtn[aria-current="true"] { box-shadow: inset 0 -2px 0 var(--accent); }
     .tile .v { font-size: 19px; }
+  }
+  /* Phone-specific touch polish */
+  @media (max-width: 560px) {
+    /* 16px inputs stop iOS from auto-zooming when a field is focused */
+    input[type=text], input[type=number], select, textarea { font-size: 16px; padding: 11px 12px; }
+    .btn { padding: 11px 15px; font-size: 14px; min-height: 44px; }
+    .switch { min-height: 40px; }
+    .controls { gap: 8px; }
+    .controls .btn { flex: 1 1 auto; justify-content: center; }
+    /* stack paired fields so long hex values aren't truncated */
+    .pair2 { grid-template-columns: 1fr !important; }
+    .content { padding-left: max(12px, env(safe-area-inset-left,0px)); padding-right: max(12px, env(safe-area-inset-right,0px)); }
+    .panel { padding: 14px; }
+    .kv { grid-template-columns: 1fr; gap: 2px 0; }
+    .kv dd { text-align: left; }
+    .tile .v { font-size: 20px; }
+    .prog-pct { font-size: 30px; }
+    .topbar h2 { font-size: 14px; }
   }
 </style>
 
@@ -244,11 +263,11 @@
                   <option value="demo">Demo (hide &amp; find a known key)</option>
                 </select>
               </label>
-              <div class="grid" style="grid-template-columns:1fr 1fr; gap:10px;">
+              <div class="grid pair2" style="grid-template-columns:1fr 1fr; gap:10px;">
                 <label class="field">Range start (hex)<input type="text" id="rstart" value="400000000000000000"></label>
                 <label class="field">Range end (hex)<input type="text" id="rend" value="7fffffffffffffffff"></label>
               </div>
-              <div class="grid" style="grid-template-columns:1fr 1fr; gap:10px;">
+              <div class="grid pair2" style="grid-template-columns:1fr 1fr; gap:10px;">
                 <label class="field">Workers (threads)<input type="number" id="workers" min="1" max="32" value="2"></label>
                 <label class="field">Window size<input type="number" id="window" min="64" max="8192" step="64" value="1024"></label>
               </div>

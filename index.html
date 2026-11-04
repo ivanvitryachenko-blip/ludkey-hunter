@@ -1,5 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0a0c10">
+<meta name="description" content="LudKey Hunter — Bitcoin Puzzle #71 research engine. Runs in your browser on phone or computer.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0c10'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%23f7931a'/%3E%3C/svg%3E">
+<style>
+  html { color-scheme: dark; -webkit-text-size-adjust: 100%; }
+  :root { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+  body { margin: 0; font: 14px system-ui, -apple-system, sans-serif; background: #0a0c10; }
+  img { max-width: 100%; }
+  [hidden] { display: none !important; }
+</style>
 <title>LudKey Hunter</title>
-<meta name="claude:viewport-fit-sides" content="cover">
+</head>
+<body>
+<title>LudKey Hunter</title>
+
 <style>
   /* Layout: fixed left rail (top tab-bar on mobile) + scrollable console panels.
      Single committed dark "instrument" theme — graphite surfaces, Bitcoin-amber
@@ -183,9 +202,28 @@
     }
     .brand { display: none; }
     .rail .spacer, .rail .foot { display: none; }
-    .navbtn { flex-direction: column; gap: 3px; font-size: 10.5px; padding: 7px 10px; white-space: nowrap; }
+    .navbtn { flex-direction: column; gap: 3px; font-size: 10.5px; padding: 8px 12px; white-space: nowrap; min-width: 56px; }
+    .navbtn .ic { font-size: 15px; }
     .navbtn[aria-current="true"] { box-shadow: inset 0 -2px 0 var(--accent); }
     .tile .v { font-size: 19px; }
+  }
+  /* Phone-specific touch polish */
+  @media (max-width: 560px) {
+    /* 16px inputs stop iOS from auto-zooming when a field is focused */
+    input[type=text], input[type=number], select, textarea { font-size: 16px; padding: 11px 12px; }
+    .btn { padding: 11px 15px; font-size: 14px; min-height: 44px; }
+    .switch { min-height: 40px; }
+    .controls { gap: 8px; }
+    .controls .btn { flex: 1 1 auto; justify-content: center; }
+    /* stack paired fields so long hex values aren't truncated */
+    .pair2 { grid-template-columns: 1fr !important; }
+    .content { padding-left: max(12px, env(safe-area-inset-left,0px)); padding-right: max(12px, env(safe-area-inset-right,0px)); }
+    .panel { padding: 14px; }
+    .kv { grid-template-columns: 1fr; gap: 2px 0; }
+    .kv dd { text-align: left; }
+    .tile .v { font-size: 20px; }
+    .prog-pct { font-size: 30px; }
+    .topbar h2 { font-size: 14px; }
   }
 </style>
 
@@ -244,11 +282,11 @@
                   <option value="demo">Demo (hide &amp; find a known key)</option>
                 </select>
               </label>
-              <div class="grid" style="grid-template-columns:1fr 1fr; gap:10px;">
+              <div class="grid pair2" style="grid-template-columns:1fr 1fr; gap:10px;">
                 <label class="field">Range start (hex)<input type="text" id="rstart" value="400000000000000000"></label>
                 <label class="field">Range end (hex)<input type="text" id="rend" value="7fffffffffffffffff"></label>
               </div>
-              <div class="grid" style="grid-template-columns:1fr 1fr; gap:10px;">
+              <div class="grid pair2" style="grid-template-columns:1fr 1fr; gap:10px;">
                 <label class="field">Workers (threads)<input type="number" id="workers" min="1" max="32" value="2"></label>
                 <label class="field">Window size<input type="number" id="window" min="64" max="8192" step="64" value="1024"></label>
               </div>
@@ -1873,3 +1911,6 @@ const startHash=location.hash.slice(1); if(titles[startHash]) switchView(startHa
 requestAnimationFrame(render);
 logEvent("info","LudKey Hunter ready — CPU engine, "+(navigator.hardwareConcurrency||"?")+" threads available");
 </script>
+
+</body>
+</html>
