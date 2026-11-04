@@ -568,22 +568,73 @@ func main() {
 
 	table := precomputeF(*window)
 	var scanned uint64
+	var segmentsDone uint64
 	var stop atomic.Bool
 	var wg sync.WaitGroup
+	startTime := time.Now()
+	devShort := reg.DeviceID
+	tShort := info.Hash160
+	if len(tShort) > 12 {
+		tShort = tShort[:8] + "…" + tShort[len(tShort)-4:]
+	}
 
-	// heartbeat + speed printer
+	// live dashboard: speed, local + shared segments, shared progress
 	go func() {
+		drawn := 0
+		render := func(lines []string) {
+			var sb strings.Builder
+			if drawn > 0 {
+				sb.WriteString(fmt.Sprintf("\033[%dA", drawn))
+			}
+			for _, ln := range lines {
+				sb.WriteString("\033[2K")
+				sb.WriteString(ln)
+				sb.WriteString("\n")
+			}
+			drawn = len(lines)
+			fmt.Print(sb.String())
+		}
 		var last uint64
 		lastT := time.Now()
 		for !stop.Load() {
-			time.Sleep(4 * time.Second)
+			time.Sleep(2 * time.Second)
 			cur := atomic.LoadUint64(&scanned)
 			dt := time.Since(lastT).Seconds()
 			spd := float64(cur-last) / dt
 			last, lastT = cur, time.Now()
 			coord.post("/api/heartbeat", map[string]any{"speed": int(spd), "scanned": fmt.Sprintf("%d", cur)}, true, nil)
-			fmt.Printf("\r[%s] total %s keys  ·  %s      ",
-				time.Now().Format("15:04:05"), human(cur), speed(spd))
+			var gs struct {
+				Summary struct {
+					ChunkCount string  `json:"chunkCount"`
+					Done       int     `json:"done"`
+					Assigned   int     `json:"assigned"`
+					Percent    float64 `json:"percent"`
+				} `json:"summary"`
+				TotalSpeed float64 `json:"totalSpeed"`
+				Devices    []struct {
+					Online bool `json:"online"`
+				} `json:"devices"`
+			}
+			coord.getJSON("/api/status", &gs)
+			online := 0
+			for _, d := range gs.Devices {
+				if d.Online {
+					online++
+				}
+			}
+			segHere := atomic.LoadUint64(&segmentsDone)
+			up := time.Since(startTime).Truncate(time.Second)
+			render([]string{
+				"╭─ LudKey Hunter · native agent ──────────────────────────────╮",
+				"  puzzle   #72   ·   target " + tShort,
+				fmt.Sprintf("  device   %s   ·   %d workers   ·   up %s", devShort, *threads, up),
+				fmt.Sprintf("  speed    %-14s (this PC)", speed(spd)),
+				fmt.Sprintf("  scanned  %-10s keys  ·  %s segments done here", human(cur), commas(segHere)),
+				fmt.Sprintf("  shared   %s segments done  ·  %d device(s) online", commas(uint64(gs.Summary.Done)), online),
+				fmt.Sprintf("  shared   %s in progress  ·  shared speed %s", commas(uint64(gs.Summary.Assigned)), speed(gs.TotalSpeed)),
+				fmt.Sprintf("  shared   %s of the #72 space searched", pctStr(gs.Summary.Percent)),
+				"╰──────────────────────────────────────────────────────────────╯",
+			})
 		}
 	}()
 
@@ -640,6 +691,7 @@ func main() {
 					return
 				}
 				coord.post("/api/complete", map[string]any{"chunkIndex": lease.Chunk.Index}, true, nil)
+				atomic.AddUint64(&segmentsDone, 1)
 			}
 		}(t)
 	}
@@ -653,6 +705,29 @@ func hexToBig(s string) *big.Int {
 	s = strings.TrimPrefix(s, "0x")
 	n, _ := new(big.Int).SetString(s, 16)
 	return n
+}
+func commas(n uint64) string {
+	s := fmt.Sprintf("%d", n)
+	if len(s) <= 3 {
+		return s
+	}
+	var out []byte
+	for i := 0; i < len(s); i++ {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			out = append(out, ',')
+		}
+		out = append(out, s[i])
+	}
+	return string(out)
+}
+func pctStr(p float64) string {
+	if p <= 0 {
+		return "0%"
+	}
+	if p >= 0.01 {
+		return fmt.Sprintf("%.4f%%", p)
+	}
+	return fmt.Sprintf("%.9f%%", p)
 }
 func human(n uint64) string {
 	f := float64(n)
