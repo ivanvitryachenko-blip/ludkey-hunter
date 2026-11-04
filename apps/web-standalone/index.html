@@ -770,14 +770,17 @@ fn jadd(Pt: Jac, Q: Jac) -> Jac {
 
 // key (16 limbs) -> affine x,y
 fn scalarMulG(key: array<u32,16>) -> array<u32,32> {
-  var Gx: array<u32,16> = array<u32,16>(0x1798u,0x16f8u,0x815bu,0x59f2u,0x28d9u,0x2dceu,0xfcdbu,0x029bu,0x0b07u,0xce87u,0x6295u,0x55a0u,0xbbacu,0xf9dcu,0x667eu,0x79beu);
-  var Gy: array<u32,16> = array<u32,16>(0xd4b8u,0xfb10u,0xd08fu,0x9c47u,0x5419u,0xa685u,0xb448u,0xfd17u,0x08a8u,0x0e11u,0xfbfcu,0x5da4u,0xc465u,0x26a3u,0xda77u,0x483au);
   var acc: Jac; var one: array<u32,16>; one[0]=1u; for(var i=1;i<16;i=i+1){one[i]=0u;}
   var z0: array<u32,16>; acc.X = one; acc.Y = one; acc.Z = z0;
-  var add: Jac; add.X = Gx; add.Y = Gy; add.Z = one;
-  for (var bit=0; bit<256; bit=bit+1){
-    if (((key[bit >> 4] >> (u32(bit) & 15u)) & 1u) == 1u) { acc = jadd(acc, add); }
-    add = jdouble(add);
+  // keys are < 2^73, so only 73 bits matter. Add the precomputed 2^bit*G for
+  // each set bit — no per-key point doublings (that was the big GPU cost).
+  for (var bit=0u; bit<73u; bit=bit+1u){
+    if (((key[bit >> 4u] >> (bit & 15u)) & 1u) == 1u) {
+      var P: Jac; let o = bit * 32u;
+      for (var j=0u;j<16u;j=j+1u){ P.X[j] = gtable[o + j]; P.Y[j] = gtable[o + 16u + j]; }
+      P.Z = one;
+      acc = jadd(acc, P);
+    }
   }
   let zi = invMod(acc.Z);
   let zi2 = sqrMod(zi); let zi3 = mulMod(zi2, zi);
@@ -878,6 +881,7 @@ fn ripemd160(H: array<u32,8>) -> array<u32,5> {
 
 @group(0) @binding(0) var<storage, read> params: array<u32>;      // [baseKey 16][target 5 (le words)][count_lo]
 @group(0) @binding(1) var<storage, read_write> result: array<atomic<u32>>; // [found_flag, found_lo, found_hi]
+@group(0) @binding(2) var<storage, read> gtable: array<u32>;      // precomputed 2^i*G affine: 16 x-limbs + 16 y-limbs per i
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -942,6 +946,12 @@ class WebGPUSearch {
         if (err) return { ok: false, reason: "WGSL compile error: " + err.message };
       }
       this.pipeline = this.device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "main" } });
+      // Precompute 2^i*G (affine) for i=0..72 and upload once, so the kernel
+      // never recomputes point doublings per key.
+      const NB = 73, tbl = new Uint32Array(NB * 32);
+      for (let i = 0; i < NB; i++) { const p = _smul(1n << BigInt(i)); tbl.set(keyToLimbs(p.x), i*32); tbl.set(keyToLimbs(p.y), i*32 + 16); }
+      this.gtableBuf = this.device.createBuffer({ size: tbl.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      this.device.queue.writeBuffer(this.gtableBuf, 0, tbl);
     } catch (e) { return { ok: false, reason: "pipeline creation failed: " + e.message }; }
     this.adapterInfo = adapter.info || {};
     const st = await this.selfTest();
@@ -961,7 +971,7 @@ class WebGPUSearch {
     this.device.queue.writeBuffer(rbuf, 0, new Uint32Array([0, 0, 0]));
     const read = this.device.createBuffer({ size: 12, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     const bind = this.device.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: { buffer: pbuf } }, { binding: 1, resource: { buffer: rbuf } }] });
+      { binding: 0, resource: { buffer: pbuf } }, { binding: 1, resource: { buffer: rbuf } }, { binding: 2, resource: { buffer: this.gtableBuf } }] });
     const enc = this.device.createCommandEncoder();
     const pass = enc.beginComputePass();
     pass.setPipeline(this.pipeline); pass.setBindGroup(0, bind);
