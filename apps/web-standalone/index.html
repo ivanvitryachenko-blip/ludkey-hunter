@@ -103,6 +103,7 @@
   .tile .v small { font-size: 12px; color: var(--muted); font-weight: 400; }
   .tile .sub { font-size: 11px; color: var(--faint); font-family: var(--mono); }
   .tile.accent .v { color: var(--accent); }
+  #d-progress { font-size: 15px; word-break: break-all; line-height: 1.25; }
 
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 7px 16px; align-items: baseline; }
   .kv dt { color: var(--muted); font-size: 12.5px; }
@@ -1013,6 +1014,14 @@ function b58check(h160hex){ const h=hexToBytes(h160hex); const payload=new Uint8
 /* ---------------- formatting ---------------- */
 function fmtSpeed(k){ if(k>=1e9)return (k/1e9).toFixed(2)+" Gkey/s"; if(k>=1e6)return (k/1e6).toFixed(2)+" Mkey/s"; if(k>=1e3)return (k/1e3).toFixed(2)+" Kkey/s"; return (k||0).toFixed(0)+" key/s"; }
 function fmtNum(n){ return Math.round(n).toLocaleString(); }
+// Percent as a full decimal (never "e-14"), so even a cosmically small share
+// reads as a real percentage with its leading significant digits.
+function fmtTinyPct(pct){
+  if(!isFinite(pct) || pct<=0) return "0%";
+  if(pct>=0.01) return (pct.toFixed(4).replace(/0+$/,"").replace(/\.$/,""))+"%";
+  const dec = Math.min(90, Math.max(2, -Math.floor(Math.log10(pct)) + 2));
+  return pct.toFixed(dec).replace(/0+$/,"")+"%";
+}
 function fmtDur(s){ if(!isFinite(s))return "∞"; const yr=365.25*24*3600;
   if(s>=yr){ const y=s/yr; if(y>=1e9)return (y/1e9).toExponential(2)+" billion yr"; if(y>=1e6)return (y/1e6).toFixed(1)+" million yr"; if(y>=1e3)return (y/1e3).toFixed(1)+"k yr"; return y.toFixed(1)+" yr"; }
   if(s>=86400)return (s/86400).toFixed(1)+" d"; if(s>=3600)return (s/3600).toFixed(1)+" h"; if(s>=60)return (s/60).toFixed(1)+" min"; return s.toFixed(0)+" s"; }
@@ -1587,7 +1596,7 @@ function renderFrame(){
   $("d-workers").textContent = t.activeWorkers+" workers active";
   const coveredAll = currentMode==="random" ? (coveredKeys() + t.covered) : t.covered;
   const pctCovered = Number(coveredAll) / Number(KEYSPACE) * 100; // float: keeps precision at tiny fractions
-  $("d-progress").textContent = currentMode==="demo" ? pctAssigned.toFixed(3)+"%" : pctCovered.toExponential(2)+"%";
+  $("d-progress").textContent = currentMode==="demo" ? pctAssigned.toFixed(3)+"%" : fmtTinyPct(pctCovered);
   $("d-uptime").textContent = fmtDur(uptime);
   $("d-matches").textContent = matches;
   $("d-backend").textContent = backendLabel;
@@ -1622,7 +1631,7 @@ function renderFrame(){
   $("s-bar").style.width = barPct+"%";
   $("prog-pct").textContent = (barPct>=10?barPct.toFixed(1):barPct.toFixed(2))+"%";
   $("prog-label").textContent = progLabel;
-  $("prog-keyspace").innerHTML = "Explored <b>"+fmtNum(Number(coveredAll))+"</b> of 2⁷⁰ (≈1.18×10²¹) keys · <b>"+pctCovered.toExponential(2)+"%</b> of the whole space";
+  $("prog-keyspace").innerHTML = "Explored <b>"+fmtNum(Number(coveredAll))+"</b> of 2⁷⁰ (≈1.18×10²¹) keys · <b>"+fmtTinyPct(pctCovered)+"</b> of the whole space";
 
   // Stats
   $("st-total").textContent = fmtNum(t.scanned);
@@ -1647,7 +1656,7 @@ function renderFrame(){
     $("d-speed").innerHTML = fmtSpeedParts(serverStatus.totalSpeed||0);
     $("d-devices").textContent = (serverStatus.devices? serverStatus.devices.filter(d=>d.online).length : 1);
     $("d-backend").textContent = "shared across devices";
-    if(serverStatus.summary){ $("d-scanned").textContent = fmtNum(Number(serverStatus.summary.scanned||0)); $("d-progress").textContent = (serverStatus.summary.percent||0).toExponential(2)+"%"; }
+    if(serverStatus.summary){ $("d-scanned").textContent = fmtNum(Number(serverStatus.summary.scanned||0)); $("d-progress").textContent = fmtTinyPct(serverStatus.summary.percent||0); }
     // devices table
     const tb=$("dev-rows");
     tb.innerHTML = serverStatus.devices.map(d=>"<tr><td>"+(d.name||d.id)+(d.id===(connCred&&connCred.id)?" (this)":"")+"</td><td>"+(d.type||"?")+"</td><td>—</td><td>—</td><td><span class='chip "+(d.online?"good":"")+"'>"+(d.online?"online":"offline")+"</span></td><td>"+fmtSpeed(d.speed||0)+"</td><td>"+(d.online?"searching":"idle")+"</td></tr>").join("");
