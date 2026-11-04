@@ -1092,7 +1092,7 @@ let gpuEngine = null;   // WebGPU search engine (lazy)
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 /* ---------------- Connected mode: shared search via a coordinator ---------------- */
-let connCred = null, connServer = "", connChunkIdx = null, serverStatus = null;
+let connCred = null, connServer = "", connChunkIdx = null, serverStatus = null, connUseGpu = false;
 let connScanned = 0, connLastScanned = 0, connLastT = 0;
 function connBase(){ let u = ($("server-url").value || "").trim(); if(!u) u = location.origin; return u.replace(/\/+$/,""); }
 async function connApi(path, method, body){
@@ -1108,8 +1108,39 @@ async function connRegister(){
   const j = await r.json(); connCred = { id:j.deviceId, token:j.token };
   try{ localStorage.setItem(key, JSON.stringify(connCred)); }catch(_){}
 }
-// Scan one leased chunk with N CPU workers; resolve on full scan or match.
+// Dispatch a leased chunk to the GPU (fast) when available, else CPU workers.
 function connScanChunk(s, e, target){
+  if(connUseGpu && gpuEngine && gpuEngine.ok) return connScanChunkGpu(s, e, target);
+  return connScanChunkCpu(s, e, target);
+}
+// Scan one leased chunk on the GPU (WebGPU). Resolves on full scan or match.
+function connScanChunkGpu(s, e, target){
+  const targetBytes = hexToBytes(target);
+  return new Promise(async (resolve)=>{
+    const entry = { worker:null, id:0, scanned:0, speed:0, last:performance.now(), lastScanned:0, status:"running", subStart:s, subEnd:e, cursor:s, conn:true, gpu:true };
+    pool = [entry];
+    let BATCH = 8192; // adapts toward ~250ms/dispatch
+    while(running){
+      if(paused){ await sleep(120); continue; }
+      if(entry.cursor > e){ entry.status="done"; entry.speed=0; resolve({done:true}); return; }
+      const remaining = e - entry.cursor + 1n;
+      const n = remaining < BigInt(BATCH) ? Number(remaining) : BATCH;
+      const t0 = performance.now();
+      let res;
+      try{ res = await gpuEngine.searchBatch(entry.cursor, targetBytes, n); }
+      catch(err){ logEvent("crit","GPU batch failed: "+err.message+" — falling back to CPU for this chunk"); connUseGpu=false; return resolve(await connScanChunkCpu(s, e, target)); }
+      if(!running){ resolve({stopped:true}); return; }
+      const dt = (performance.now()-t0)/1000;
+      entry.scanned += n; entry.cursor += BigInt(n); entry.speed = dt>0 ? n/dt : 0;
+      if(dt < 0.15) BATCH = Math.min(1<<20, BATCH*2); else if(dt > 0.5) BATCH = Math.max(256, (BATCH/2)|0);
+      if(res.found){ const h160 = ecHash160Compressed(res.key); resolve({found:true, key:"0x"+res.key.toString(16), h160}); return; }
+      await sleep(0);
+    }
+    resolve({stopped:true});
+  });
+}
+// Scan one leased chunk with N CPU workers; resolve on full scan or match.
+function connScanChunkCpu(s, e, target){
   return new Promise((resolve)=>{
     const workers = Math.max(1, Math.min(32, parseInt($("workers").value)||2));
     const windowSize = Math.max(64, Math.min(8192, parseInt($("window").value)||1024));
@@ -1161,7 +1192,11 @@ async function startConnected(){
   catch(e){ $("conn-status").textContent = "Could not reach coordinator: "+e.message; logEvent("crit","Coordinator registration failed: "+e.message); return false; }
   let info; try{ info = await (await fetch(connServer+"/api/info")).json(); }catch(e){ $("conn-status").textContent="Coordinator /api/info failed"; return false; }
   const target = info.hash160;
-  backendLabel = "Connected (CPU)";
+  // Use the GPU (WebGPU) when the chosen backend allows and it passes self-test
+  // — this is the big speed-up vs CPU-only. Falls back to CPU otherwise.
+  const backendSel = $("backend").value;
+  connUseGpu = (backendSel==="auto" || backendSel==="gpu" || backendSel==="hybrid") && await ensureGpu();
+  backendLabel = connUseGpu ? "Connected (GPU)" : "Connected (CPU)";
   connScanned = 0; connLastScanned = 0;
   const entry = { id:0, scanned:0, speed:0, status:"running", subStart:0n, subEnd:0n, cursor:0n }; // placeholder; replaced per chunk
   pool = [entry];
