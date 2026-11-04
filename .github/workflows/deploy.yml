@@ -33,3 +33,17 @@ jobs:
           workingDirectory: "packages/cloudflare"
           wranglerVersion: "3.99.0"
           command: deploy
+      - name: Verify the live deployment
+        run: |
+          BASE="https://ludkey-hunter.8jt6mh8rz9.workers.dev"
+          sleep 6
+          echo "=== GET /api/info ==="
+          curl -fsS "$BASE/api/info" ; echo
+          echo "=== POST /api/register ==="
+          REG=$(curl -fsS -X POST -H 'content-type: application/json' -d '{"type":"ci","name":"ci-probe"}' "$BASE/api/register"); echo "$REG"
+          TOKEN=$(printf '%s' "$REG" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+          echo "=== POST /api/lease (auth) ==="
+          curl -fsS -X POST -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d '{}' "$BASE/api/lease" ; echo
+          echo "=== GET / (first 120 chars) ==="
+          curl -fsS "$BASE/" | head -c 120 ; echo
+          echo "VERIFY-OK"
