@@ -13,7 +13,7 @@ import {
   bytesToHex, hexToBytes, hash160, hash160FromPointCompressed,
   pointToAddressCompressed, addressToHash160, hash160ToAddress,
 } from "../src/address.ts";
-import { SOLVED_VECTORS, getTargetHash160Hex, PUZZLE_71, rangeSize } from "../src/puzzle.ts";
+import { SOLVED_VECTORS, getTargetHash160Hex, PUZZLE_72, rangeSize } from "../src/puzzle.ts";
 
 let passed = 0, failed = 0;
 function check(name: string, cond: boolean, detail = "") {
@@ -125,16 +125,16 @@ console.log("\n== address <-> hash160 round trip ==");
   eq("address->hash160 round trip", bytesToHex(back), "751e76e8199196d454941c45d1b3a323f1433bd6");
 }
 
-console.log("\n== Puzzle #71 target ==");
+console.log("\n== Puzzle #72 target ==");
 {
   let ok = true, h = "";
   try { h = getTargetHash160Hex(); } catch (e) { ok = false; h = String(e); }
-  check("puzzle #71 address has valid Base58Check checksum (decodes)", ok, h);
-  console.log(`        address   = ${PUZZLE_71.address}`);
+  check("puzzle #72 address has valid Base58Check checksum (decodes)", ok, h);
+  console.log(`        address   = ${PUZZLE_72.address}`);
   console.log(`        hash160   = ${h}`);
-  console.log(`        range     = 0x${PUZZLE_71.rangeStart.toString(16)} .. 0x${PUZZLE_71.rangeEnd.toString(16)}`);
-  console.log(`        range size= ${rangeSize().toString()} (= 2^70)`);
-  check("range size is exactly 2^70", rangeSize() === (1n << 70n));
+  console.log(`        range     = 0x${PUZZLE_72.rangeStart.toString(16)} .. 0x${PUZZLE_72.rangeEnd.toString(16)}`);
+  console.log(`        range size= ${rangeSize().toString()} (= 2^71)`);
+  check("range size is exactly 2^71", rangeSize() === (1n << 71n));
 }
 
 console.log(`\n==== ${passed} passed, ${failed} failed ====\n`);

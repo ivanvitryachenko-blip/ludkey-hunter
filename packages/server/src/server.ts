@@ -16,7 +16,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { RangeAllocator } from "./allocator.ts";
-import { PUZZLE_71, getTargetHash160Hex } from "../../core/src/puzzle.ts";
+import { PUZZLE_72, getTargetHash160Hex } from "../../core/src/puzzle.ts";
 
 interface Device { id: string; token: string; name: string; type: string; gpu?: string; createdAt: number; lastSeen: number; scanned: string; speed: number; }
 
@@ -24,10 +24,10 @@ interface Device { id: string; token: string; name: string; type: string; gpu?: 
 let DATA_DIR = "./data";
 let STATE_FILE = join(DATA_DIR, "state.json");
 let MATCH_FILE = join(DATA_DIR, "FOUND_KEY.json"); // local only, never served
-let CHUNK_SIZE = 1n << 40n;
+let CHUNK_SIZE = 1n << 25n;
 let PORT = 8071;
 
-let allocator = new RangeAllocator(PUZZLE_71.rangeStart, PUZZLE_71.rangeEnd, CHUNK_SIZE);
+let allocator = new RangeAllocator(PUZZLE_72.rangeStart, PUZZLE_72.rangeEnd, CHUNK_SIZE);
 const devices = new Map<string, Device>();
 
 // The web app, loaded once at startup and served at "/".
@@ -49,9 +49,18 @@ function loadState() {
   if (existsSync(STATE_FILE)) {
     try {
       const o = JSON.parse(readFileSync(STATE_FILE, "utf8"));
-      if (o.allocator) allocator = RangeAllocator.deserialize(o.allocator);
-      if (o.devices) for (const d of o.devices) devices.set(d.id, d);
-      console.log(`[state] restored ${devices.size} devices, ${allocator.summary().done} chunks done`);
+      if (o.allocator) {
+        const restored = RangeAllocator.deserialize(o.allocator);
+        // Discard state from a different puzzle/range (e.g. an old #71 file) —
+        // the active puzzle must start clean.
+        if (restored.rangeStart === PUZZLE_72.rangeStart && restored.rangeEnd === PUZZLE_72.rangeEnd) {
+          allocator = restored;
+          if (o.devices) for (const d of o.devices) devices.set(d.id, d);
+          console.log(`[state] restored ${devices.size} devices, ${allocator.summary().done} chunks done`);
+        } else {
+          console.log(`[state] stored range does not match puzzle #${PUZZLE_72.number}; starting clean`);
+        }
+      }
     } catch (e) { console.error("[state] restore failed:", (e as Error).message); }
   }
 }
@@ -95,7 +104,7 @@ const server = http.createServer(async (req, res) => {
 
     // Public: puzzle info + aggregate status
     if (path === "/api/info" && req.method === "GET") {
-      return send(res, 200, { puzzle: PUZZLE_71.number, address: PUZZLE_71.address, hash160: getTargetHash160Hex(), rangeStart: "0x" + PUZZLE_71.rangeStart.toString(16), rangeEnd: "0x" + PUZZLE_71.rangeEnd.toString(16), chunkSize: "0x" + CHUNK_SIZE.toString(16) });
+      return send(res, 200, { puzzle: PUZZLE_72.number, address: PUZZLE_72.address, hash160: getTargetHash160Hex(), rangeStart: "0x" + PUZZLE_72.rangeStart.toString(16), rangeEnd: "0x" + PUZZLE_72.rangeEnd.toString(16), chunkSize: "0x" + CHUNK_SIZE.toString(16) });
     }
     if (path === "/api/status" && req.method === "GET") {
       const s = allocator.summary();
@@ -160,13 +169,13 @@ export function start() {
   DATA_DIR = process.env.LUDKEY_DATA || "./data";
   STATE_FILE = join(DATA_DIR, "state.json");
   MATCH_FILE = join(DATA_DIR, "FOUND_KEY.json");
-  CHUNK_SIZE = BigInt(process.env.LUDKEY_CHUNK || (1n << 40n).toString());
+  CHUNK_SIZE = BigInt(process.env.LUDKEY_CHUNK || (1n << 25n).toString());
   PORT = Number(process.env.PORT || 8071);
-  allocator = new RangeAllocator(PUZZLE_71.rangeStart, PUZZLE_71.rangeEnd, CHUNK_SIZE);
+  allocator = new RangeAllocator(PUZZLE_72.rangeStart, PUZZLE_72.rangeEnd, CHUNK_SIZE);
   loadState();
   const appPath = loadApp();
   server.listen(PORT, () => {
-    console.log(`LudKey Hunter server on http://localhost:${PORT}  (puzzle #${PUZZLE_71.number}, chunk 0x${CHUNK_SIZE.toString(16)})`);
+    console.log(`LudKey Hunter server on http://localhost:${PORT}  (puzzle #${PUZZLE_72.number}, chunk 0x${CHUNK_SIZE.toString(16)})`);
     console.log(appPath ? `  serving the web app at /  (open http://<this-host>:${PORT}/ on your devices)` : `  (web app not found; API only)`);
   });
 }

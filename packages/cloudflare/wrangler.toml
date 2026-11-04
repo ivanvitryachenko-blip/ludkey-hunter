@@ -1,0 +1,36 @@
+# LudKey Hunter — Cloudflare Worker coordinator for puzzle #72.
+#
+# Deploy to YOUR OWN Cloudflare account (free plan is enough):
+#   1. npm i -g wrangler        # one time
+#   2. wrangler login           # opens your browser, authorizes
+#   3. wrangler deploy          # prints your public URL
+#
+# The URL it prints (https://ludkey-hunter.<you>.workers.dev) is the single
+# link you open on every device — phone and PCs — to search together. No home
+# machine stays on; the coordinator lives on Cloudflare's edge.
+
+name = "ludkey-hunter"
+main = "src/worker.js"
+compatibility_date = "2025-01-01"
+
+# Serve the web app (packages/cloudflare/public/index.html) from the same URL,
+# so the app and the coordinator share one origin (no CORS to configure).
+[assets]
+directory = "public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+# The coordinator is one Durable Object instance holding the shared allocator
+# state, so leasing chunks is atomic across all devices.
+[[durable_objects.bindings]]
+name = "COORDINATOR"
+class_name = "Coordinator"
+
+# SQLite-backed Durable Objects are available on the FREE Workers plan.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Coordinator"]
+
+# Optional: change the segment size (default 2^25). Example for 2^20:
+# [vars]
+# CHUNK_BITS = "20"

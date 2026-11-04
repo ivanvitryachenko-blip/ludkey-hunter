@@ -24,15 +24,15 @@ export interface PuzzleDef {
 }
 
 /**
- * Puzzle #71 — the primary target of LudKey Hunter.
- * Range: [2^70, 2^71 - 1]. Address corroborated across public puzzle sources;
+ * Puzzle #72 — the primary target of LudKey Hunter.
+ * Range: [2^71, 2^72 - 1]. Address corroborated across public puzzle sources;
  * the Base58Check checksum is verified at load time (see getTargetHash160).
  */
-export const PUZZLE_71: PuzzleDef = {
-  number: 71,
-  address: "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU",
-  rangeStart: 1n << 70n, // 0x400000000000000000
-  rangeEnd: (1n << 71n) - 1n, // 0x7fffffffffffffffff
+export const PUZZLE_72: PuzzleDef = {
+  number: 72,
+  address: "1JTK7s9YVYywfm5XUH7RNhHJH1LshCaRFR",
+  rangeStart: 1n << 71n, // 0x800000000000000000
+  rangeEnd: (1n << 72n) - 1n, // 0xffffffffffffffffff
   pubkeyExposed: false,
   solved: false,
 };
@@ -58,21 +58,21 @@ export const SOLVED_VECTORS: { number: number; key: bigint; address: string }[] 
 let _targetHash160: Uint8Array | null = null;
 
 /**
- * Target hash160 for the active puzzle (#71). Decoding the address with our own
+ * Target hash160 for the active puzzle (#72). Decoding the address with our own
  * Base58Check decoder validates its checksum — if the stored address were
  * malformed this would throw at startup rather than silently search a bad hash.
  */
-export function getTargetHash160(puzzle: PuzzleDef = PUZZLE_71): Uint8Array {
-  if (puzzle === PUZZLE_71 && _targetHash160) return _targetHash160;
+export function getTargetHash160(puzzle: PuzzleDef = PUZZLE_72): Uint8Array {
+  if (puzzle === PUZZLE_72 && _targetHash160) return _targetHash160;
   const h = addressToHash160(puzzle.address);
-  if (puzzle === PUZZLE_71) _targetHash160 = h;
+  if (puzzle === PUZZLE_72) _targetHash160 = h;
   return h;
 }
 
-export function getTargetHash160Hex(puzzle: PuzzleDef = PUZZLE_71): string {
+export function getTargetHash160Hex(puzzle: PuzzleDef = PUZZLE_72): string {
   return bytesToHex(getTargetHash160(puzzle));
 }
 
-export function rangeSize(puzzle: PuzzleDef = PUZZLE_71): bigint {
+export function rangeSize(puzzle: PuzzleDef = PUZZLE_72): bigint {
   return puzzle.rangeEnd - puzzle.rangeStart + 1n;
 }

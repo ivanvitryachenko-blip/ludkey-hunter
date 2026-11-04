@@ -1,10 +1,10 @@
 // Tests for the multi-device range allocator. Key properties: across any
 // sequence of leases/completions/expiries no two devices ever hold the same
-// chunk, chunks tile the full range, and it scales to the real 2^70 #71 space
+// chunk, chunks tile the full range, and it scales to the real 2^71 #72 space
 // without materializing a billion objects.
 
 import { RangeAllocator } from "../src/allocator.ts";
-import { PUZZLE_71 } from "../../core/src/puzzle.ts";
+import { PUZZLE_72 } from "../../core/src/puzzle.ts";
 
 let passed = 0, failed = 0;
 function check(name: string, cond: boolean, detail = "") {
@@ -12,16 +12,16 @@ function check(name: string, cond: boolean, detail = "") {
   else { failed++; console.log(`  FAIL  ${name}  ${detail}`); }
 }
 
-console.log("\n== scales to the real #71 range (lazy, no OOM) ==");
+console.log("\n== scales to the real #72 range (lazy, no OOM) ==");
 {
-  const a = new RangeAllocator(PUZZLE_71.rangeStart, PUZZLE_71.rangeEnd, 1n << 40n);
-  check("chunk count == 2^30", a.chunkCount === (1n << 30n), "got " + a.chunkCount);
+  const a = new RangeAllocator(PUZZLE_72.rangeStart, PUZZLE_72.rangeEnd, 1n << 40n);
+  check("chunk count == 2^31", a.chunkCount === (1n << 31n), "got " + a.chunkCount);
   const cov = a.verifyCoverage();
-  check("chunks tile the #71 range exactly (first.start, last.end, adjacency)", cov.ok, cov.reason || "");
+  check("chunks tile the #72 range exactly (first.start, last.end, adjacency)", cov.ok, cov.reason || "");
   const c0 = a.chunkAt(0n);
-  check("chunk 0 starts at range start", c0.start === PUZZLE_71.rangeStart);
+  check("chunk 0 starts at range start", c0.start === PUZZLE_72.rangeStart);
   const cl = a.chunkAt(a.chunkCount - 1n);
-  check("last chunk ends at range end", cl.end === PUZZLE_71.rangeEnd);
+  check("last chunk ends at range end", cl.end === PUZZLE_72.rangeEnd);
   // lease a few; indices must be distinct and bounds disjoint
   const leased = [a.lease("A"), a.lease("B"), a.lease("C")].filter(Boolean);
   check("3 leases on huge range succeed instantly", leased.length === 3);

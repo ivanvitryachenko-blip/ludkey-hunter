@@ -231,7 +231,7 @@
 
 <div class="app">
   <nav class="rail" aria-label="Sections">
-    <div class="brand"><span class="dot"></span><div><b>LudKey&nbsp;Hunter</b><br><span>puzzle&nbsp;#71</span></div></div>
+    <div class="brand"><span class="dot"></span><div><b>LudKey&nbsp;Hunter</b><br><span>puzzle&nbsp;#72</span></div></div>
     <button class="navbtn" data-view="dashboard" aria-current="true"><span class="ic">▦</span>Dashboard</button>
     <button class="navbtn" data-view="search"><span class="ic">⌕</span>Search</button>
     <button class="navbtn" data-view="devices"><span class="ic">▤</span>Devices</button>
@@ -259,10 +259,26 @@
         <div class="grid g-tiles">
           <div class="tile accent"><span class="k">Aggregate speed</span><span class="v tnum" id="d-speed">0 <small>key/s</small></span><span class="sub" id="d-backend">backend —</span></div>
           <div class="tile"><span class="k">Keys scanned</span><span class="v tnum" id="d-scanned">0</span><span class="sub" id="d-workers">0 workers</span></div>
-          <div class="tile"><span class="k">Range covered</span><span class="v tnum" id="d-progress">0%</span><span class="sub">of 2⁷⁰ keyspace</span></div>
+          <div class="tile"><span class="k">Range covered</span><span class="v tnum" id="d-progress">0%</span><span class="sub">of 2⁷¹ keyspace</span></div>
           <div class="tile"><span class="k">Devices</span><span class="v tnum" id="d-devices">1</span><span class="sub">this browser</span></div>
           <div class="tile"><span class="k">Uptime</span><span class="v tnum" id="d-uptime">0s</span><span class="sub" id="d-status2">idle</span></div>
           <div class="tile"><span class="k">Matches</span><span class="v tnum" id="d-matches">0</span><span class="sub">confirmed on CPU</span></div>
+        </div>
+        <div class="panel" id="segpanel" style="margin-top:14px;">
+          <h3>Segment progress — whole #72 range in 2²⁵ segments</h3>
+          <div style="margin:6px 0 10px;">
+            <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px;">
+              <span class="hint" id="seg-label">Done across all devices</span>
+              <span class="prog-pct" id="seg-pct" style="font-size:clamp(20px,5vw,26px)">0%</span>
+            </div>
+            <div class="bar"><i id="seg-bar"></i></div>
+          </div>
+          <div class="grid g-tiles">
+            <div class="tile"><span class="k">Total segments</span><span class="v tnum" id="seg-total">—</span><span class="sub">2²⁵ keys each</span></div>
+            <div class="tile"><span class="k">Done</span><span class="v tnum" id="seg-done">0</span><span class="sub">fully searched</span></div>
+            <div class="tile"><span class="k">In progress</span><span class="v tnum" id="seg-active">0</span><span class="sub">leased now</span></div>
+            <div class="tile"><span class="k">Remaining</span><span class="v tnum" id="seg-pending">—</span><span class="sub">not yet searched</span></div>
+          </div>
         </div>
         <div class="grid g-2">
           <div class="panel"><h3>Aggregate speed (live)</h3><canvas id="chart-dash" width="1000" height="150" aria-label="Speed chart"></canvas></div>
@@ -278,16 +294,16 @@
             <div style="display:flex; flex-direction:column; gap:12px;">
               <label class="field">Mode
                 <select id="mode">
-                  <option value="puzzle">Puzzle #71 — sequential (resumes where it left off)</option>
-                  <option value="random">Puzzle #71 — random, no-repeat (saves covered segments)</option>
+                  <option value="connected" selected>Collaborative — all devices split the range into 2²⁵ segments (coordinator)</option>
                   <option value="shared">Shared via Claude — all devices together, NO server</option>
-                  <option value="connected">Connected — shared via your own coordinator server</option>
+                  <option value="random">Puzzle #72 — random, no-repeat (saves covered segments)</option>
+                  <option value="puzzle">Puzzle #72 — sequential (resumes where it left off)</option>
                   <option value="demo">Demo (hide &amp; find a known key)</option>
                 </select>
               </label>
               <div class="grid pair2" style="grid-template-columns:1fr 1fr; gap:10px;">
-                <label class="field">Range start (hex)<input type="text" id="rstart" value="400000000000000000"></label>
-                <label class="field">Range end (hex)<input type="text" id="rend" value="7fffffffffffffffff"></label>
+                <label class="field">Range start (hex)<input type="text" id="rstart" value="800000000000000000"></label>
+                <label class="field">Range end (hex)<input type="text" id="rend" value="ffffffffffffffffff"></label>
               </div>
               <div class="grid pair2" style="grid-template-columns:1fr 1fr; gap:10px;">
                 <label class="field">Workers (threads)<input type="number" id="workers" min="1" max="32" value="2"></label>
@@ -308,14 +324,14 @@
               </div>
               <div id="connectedBox" hidden style="display:flex; flex-direction:column; gap:8px; border:1px solid var(--accent-dim); border-radius:8px; padding:10px;">
                 <label class="field">Coordinator server URL
-                  <input type="text" id="server-url" placeholder="https://your-coordinator.example  (leave blank if this page is served by it)">
+                  <input type="text" id="server-url" placeholder="leave blank — this page is served by the coordinator">
                 </label>
-                <p class="hint">All devices that open the same coordinator share one search: the server hands each device a different, non-overlapping chunk. Run the coordinator once (see INSTALL.md), then open its URL on your phone and PCs.</p>
+                <p class="hint">Все устройства, открывшие одну и ту же ссылку координатора, ищут вместе: сервер выдаёт каждому устройству свой непересекающийся сегмент 2²⁵. Разверните бесплатный координатор на Cloudflare один раз (<span class="mono">wrangler deploy</span>, см. packages/cloudflare/README.md) и откройте полученную ссылку на телефоне и компьютерах. Если страница открыта по ссылке самого координатора — поле оставьте пустым.</p>
                 <span class="hint" id="conn-status">Not connected.</span>
               </div>
               <div id="randomBox" hidden>
                 <label class="field">Segment size (2^N keys per segment)
-                  <input type="number" id="chunkbits" min="16" max="40" value="20">
+                  <input type="number" id="chunkbits" min="16" max="40" value="25">
                 </label>
                 <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
                   <span class="hint" id="coveredText">Covered: 0 segments</span>
@@ -340,7 +356,7 @@
           <div class="panel">
             <h3>Target</h3>
             <dl class="kv">
-              <dt>Puzzle</dt><dd id="s-puzzle">#71</dd>
+              <dt>Puzzle</dt><dd id="s-puzzle">#72</dd>
               <dt>Address</dt><dd id="s-addr" class="mono">—</dd>
               <dt>hash160</dt><dd id="s-h160" class="mono">—</dd>
               <dt>Pubkey known</dt><dd id="s-pub">no (hash160 search only)</dd>
@@ -364,7 +380,7 @@
           <div class="prog-track"><div class="prog-fill" id="s-bar"></div></div>
           <div class="prog-ticks"><span>0</span><span>25</span><span>50</span><span>75</span><span>100%</span></div>
           <p class="prog-sub" id="s-progresstext">Not started.</p>
-          <p class="prog-sub" id="prog-keyspace">Explored <b>0</b> of 2⁷⁰ (≈1.18×10²¹) keys.</p>
+          <p class="prog-sub" id="prog-keyspace">Explored <b>0</b> of 2⁷¹ (≈2.36×10²¹) keys.</p>
         </div>
         <div class="panel"><h3>Speed (live)</h3><canvas id="chart-search" width="1000" height="170"></canvas></div>
       </section>
@@ -470,7 +486,7 @@
           </div>
           <p class="hint" id="backup-status"></p>
         </div>
-        <div class="note crit"><b>Reality check.</b> Puzzle #71 has a 2⁷⁰ keyspace (≈1.18×10²¹ keys). Even a top-end GPU at billions of keys/s would need thousands of years to exhaust it; this browser engine is far slower. Treat this as a research/educational tool and a lottery with astronomically low odds, not an income strategy. If a match is ever found it is shown only on this device and never transmitted.</div>
+        <div class="note crit"><b>Reality check.</b> Puzzle #72 has a 2⁷¹ keyspace (≈2.36×10²¹ keys). Even a top-end GPU at billions of keys/s would need thousands of years to exhaust it; this browser engine is far slower. Treat this as a research/educational tool and a lottery with astronomically low odds, not an income strategy. If a match is ever found it is shown only on this device and never transmitted.</div>
         <div class="panel"><h3>About</h3>
           <p class="hint">LudKey Hunter standalone web engine. secp256k1 + SHA-256 + RIPEMD-160 implemented in pure JavaScript, verified in-browser against known test vectors at startup, and run in Web Workers (one disjoint sub-range each — no duplicated work). The same algorithms have a WebGPU/WGSL acceleration path and a native CUDA desktop agent in the full project source.</p>
         </div>
@@ -1011,10 +1027,10 @@ window.WebGPUSearch = WebGPUSearch;
 "use strict";
 /* =========================== Main thread UI =========================== */
 const $ = (id) => document.getElementById(id);
-const PUZZLE = { number:71, address:"1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU",
-  h160:"f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8",
-  start: 1n<<70n, end: (1n<<71n)-1n };
-const KEYSPACE = (1n<<71n) - (1n<<70n); // 2^70
+const PUZZLE = { number:72, address:"1JTK7s9YVYywfm5XUH7RNhHJH1LshCaRFR",
+  h160:"bf7413e8df4e7a34ce9dc13e2f2648783ec54adb",
+  start: 1n<<71n, end: (1n<<72n)-1n };
+const KEYSPACE = (1n<<72n) - (1n<<71n); // 2^71
 
 /* ---- base58check (main thread, for address display of found/demo keys) ---- */
 const B58="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -1046,6 +1062,41 @@ function fmtTinyPct(pct){
   if(pct>=0.01) return (pct.toFixed(4).replace(/0+$/,"").replace(/\.$/,""))+"%";
   const dec = Math.min(90, Math.max(2, -Math.floor(Math.log10(pct)) + 2));
   return pct.toFixed(dec).replace(/0+$/,"")+"%";
+}
+// Progress across ALL segments of the whole #72 range, by mode. Percentages
+// are segment-level (done segments / total segments) and stay honest even when
+// the share is astronomically small.
+function renderSegments(){
+  let totalBig, done=0, active=0, label="Done across all devices";
+  if(currentMode==="connected" && serverStatus && serverStatus.summary){
+    const s=serverStatus.summary;
+    totalBig = BigInt(s.chunkCount);
+    done = Number(s.done||0); active = Number(s.assigned||0);
+    label = "Segments completed by all connected devices";
+  } else if(currentMode==="shared"){
+    totalBig = KEYSPACE >> BigInt(chunkBits);
+    done = sharedDone.size; active = 0;
+    label = "Segments completed by all devices (Claude shared store)";
+  } else if(currentMode==="random"){
+    totalBig = chunkCount();
+    done = doneChunks.size; active = activeChunks.size;
+    label = "Segments covered in this browser (random, no-repeat)";
+  } else {
+    // sequential / demo: express covered keys as 2²⁵ segments for a common scale
+    totalBig = KEYSPACE >> 25n;
+    done = 0; active = running?1:0;
+    label = "Sequential mode — segment view (progress shown on the Search tab)";
+  }
+  const total = Number(totalBig);
+  const pending = Number(totalBig - BigInt(done) - BigInt(active));
+  const pct = total>0 ? (done/total)*100 : 0;
+  $("seg-total").textContent = fmtNum(total);
+  $("seg-done").textContent = done.toLocaleString();
+  $("seg-active").textContent = active.toLocaleString();
+  $("seg-pending").textContent = fmtNum(Math.max(0,pending));
+  $("seg-pct").textContent = fmtTinyPct(pct);
+  $("seg-label").textContent = label;
+  $("seg-bar").style.width = Math.max(0, Math.min(100, pct))+"%";
 }
 function fmtDur(s){ if(!isFinite(s))return "∞"; const yr=365.25*24*3600;
   if(s>=yr){ const y=s/yr; if(y>=1e9)return (y/1e9).toExponential(2)+" billion yr"; if(y>=1e6)return (y/1e6).toFixed(1)+" million yr"; if(y>=1e3)return (y/1e3).toFixed(1)+"k yr"; return y.toFixed(1)+" yr"; }
@@ -1363,14 +1414,14 @@ async function tryStartGpuRandom(){
 async function gpuRandomLoop(entry, targetBytes){
   let BATCH = 8192;
   const pick = () => { const idx = randomUndoneChunk(); if(idx===null) return false; activeChunks.add(idx.toString()); const [s,e]=chunkBounds(idx); entry.chunkIndex=idx; entry.subStart=s; entry.subEnd=e; entry.cursor=s; return true; };
-  if(entry.chunkIndex===null && !pick()){ finish("entire 2^70 space covered (!)"); return; }
+  if(entry.chunkIndex===null && !pick()){ finish("entire 2^71 space covered (!)"); return; }
   while(running){
     if(paused){ await sleep(120); continue; }
     if(entry.cursor > entry.subEnd){
       const k = entry.chunkIndex.toString(); activeChunks.delete(k); doneChunks.add(k); saveDone();
       entry.base = (entry.base||0) + Number(entry.subEnd - entry.subStart + 1n);
       entry.chunkIndex = null;
-      if(!pick()){ finish("entire 2^70 space covered (!)"); return; }
+      if(!pick()){ finish("entire 2^71 space covered (!)"); return; }
     }
     const remaining = entry.subEnd - entry.cursor + 1n;
     const n = remaining < BigInt(BATCH) ? Number(remaining) : BATCH;
@@ -1396,7 +1447,7 @@ async function gpuRandomLoop(entry, targetBytes){
 let running = false, paused = false;
 let sessionStart = 0, totalPrev = 0;
 let maxSpeed = 0, matches = 0;
-let currentMode = "puzzle";
+let currentMode = "connected";
 const speedHistory = [];      // {t, speed}
 let lastAggT = 0, lastAggScanned = 0;
 
@@ -1413,18 +1464,18 @@ function splitRange(start, end, parts){
 }
 
 /* ---------------- random no-repeat segment tracking ---------------- */
-// At 2^70 keys you cannot store individual checked keys (that would be petabytes
+// At 2^71 keys you cannot store individual checked keys (that would be petabytes
 // and collisions essentially never happen anyway). Instead we divide the range
 // into 2^chunkBits-key SEGMENTS and persist which segments are fully covered, so
 // random search never re-scans a finished segment. This survives reloads.
-let chunkBits = 20;
+let chunkBits = 25;
 let doneChunks = new Set();            // completed segment indices (as strings), persisted
 let activeChunks = new Set();          // segments currently being scanned (in-memory), avoids concurrent overlap
 function chunkCount(){ return KEYSPACE >> BigInt(chunkBits); }
 function chunkBounds(idx){ const sz = 1n << BigInt(chunkBits); const s = PUZZLE.start + idx*sz; let e = s + sz - 1n; if(e>PUZZLE.end) e=PUZZLE.end; return [s,e]; }
-function loadDone(){ try{ const a=JSON.parse(localStorage.getItem("ludkey.done.v2")||"[]"); doneChunks=new Set(a); }catch(_){ doneChunks=new Set(); }
-  try{ const cb=localStorage.getItem("ludkey.chunkbits"); if(cb) chunkBits=Math.max(16,Math.min(40,parseInt(cb))); }catch(_){} }
-function saveDone(){ try{ localStorage.setItem("ludkey.done.v2", JSON.stringify([...doneChunks])); }catch(_){} }
+function loadDone(){ try{ const a=JSON.parse(localStorage.getItem("ludkey.done.72")||"[]"); doneChunks=new Set(a); }catch(_){ doneChunks=new Set(); }
+  try{ const cb=localStorage.getItem("ludkey.chunkbits.72"); if(cb) chunkBits=Math.max(16,Math.min(40,parseInt(cb))); }catch(_){} }
+function saveDone(){ try{ localStorage.setItem("ludkey.done.72", JSON.stringify([...doneChunks])); }catch(_){} }
 function randomUndoneChunk(){
   const total = chunkCount();
   if(BigInt(doneChunks.size) >= total) return null;      // whole space covered (never happens in practice)
@@ -1445,15 +1496,15 @@ function coveredKeys(){ return BigInt(doneChunks.size) * (1n<<BigInt(chunkBits))
 function saveResumeState(start, end){
   try{
     const positions = {}; for(const p of pool){ positions["0x"+p.subStart.toString(16)] = "0x"+p.cursor.toString(16); }
-    localStorage.setItem("ludkey.resume.v1", JSON.stringify({ start:"0x"+start.toString(16), end:"0x"+end.toString(16), positions }));
+    localStorage.setItem("ludkey.resume.72", JSON.stringify({ start:"0x"+start.toString(16), end:"0x"+end.toString(16), positions }));
   }catch(_){}
 }
 function loadResumePositions(start, end){
-  try{ const o=JSON.parse(localStorage.getItem("ludkey.resume.v1")||"null");
+  try{ const o=JSON.parse(localStorage.getItem("ludkey.resume.72")||"null");
     if(o && BigInt(o.start)===start && BigInt(o.end)===end) return o.positions; }catch(_){}
   return null;
 }
-function clearResume(){ try{ localStorage.removeItem("ludkey.resume.v1"); }catch(_){} }
+function clearResume(){ try{ localStorage.removeItem("ludkey.resume.72"); }catch(_){} }
 
 function assignRandomChunk(entry){
   const idx = randomUndoneChunk();
@@ -1479,7 +1530,7 @@ async function startSearch(){
   // --- RANDOM no-repeat mode ---
   if(mode==="random"){
     chunkBits = Math.max(16, Math.min(40, parseInt($("chunkbits").value)||20));
-    try{ localStorage.setItem("ludkey.chunkbits", String(chunkBits)); }catch(_){}
+    try{ localStorage.setItem("ludkey.chunkbits.72", String(chunkBits)); }catch(_){}
     // GPU / Hybrid path for random mode
     if(backend==="hybrid" && window.WebGPUSearch){
       const started = await tryStartHybridRandom();
@@ -1511,7 +1562,7 @@ async function startSearch(){
 
   let start, end, target;
   if(mode==="demo"){
-    // hide a random key within a small window of the #71 range
+    // hide a random key within a small window of the #72 range
     const span = 200000n;
     const secret = PUZZLE.start + (BigInt(Math.floor(Math.random()*1e9)) % (KEYSPACE - span));
     start = secret - span/2n; end = secret + span/2n;
@@ -1522,7 +1573,7 @@ async function startSearch(){
     start = BigInt("0x"+$("rstart").value.replace(/^0x/,""));
     end = BigInt("0x"+$("rend").value.replace(/^0x/,""));
     target = PUZZLE.h160;
-    logEvent("info","Search started on Puzzle #71 range");
+    logEvent("info","Search started on Puzzle #72 range");
   }
   const workers = Math.max(1, Math.min(32, parseInt($("workers").value)||2));
   const windowSize = Math.max(64, Math.min(8192, parseInt($("window").value)||1024));
@@ -1629,7 +1680,7 @@ function onWorkerMsg(entry, m){
       entry.lastScanned = entry.base; // avoid counting the completion jump as a speed spike
       const k = entry.chunkIndex.toString(); activeChunks.delete(k); doneChunks.add(k); saveDone();
       const more = assignRandomChunk(entry);
-      if(!more && pool.every(p=>p.status==="done"||p.status==="stopped")) finish("entire 2^70 space covered (!)");
+      if(!more && pool.every(p=>p.status==="done"||p.status==="stopped")) finish("entire 2^71 space covered (!)");
       return;
     }
     entry.status="done"; entry.speed=0;
@@ -1740,7 +1791,7 @@ function renderFrame(){
   $("s-bar").style.width = barPct+"%";
   $("prog-pct").textContent = (barPct>=10?barPct.toFixed(1):barPct.toFixed(2))+"%";
   $("prog-label").textContent = progLabel;
-  $("prog-keyspace").innerHTML = "Explored <b>"+fmtNum(Number(coveredAll))+"</b> of 2⁷⁰ (≈1.18×10²¹) keys · <b>"+fmtTinyPct(pctCovered)+"</b> of the whole space";
+  $("prog-keyspace").innerHTML = "Explored <b>"+fmtNum(Number(coveredAll))+"</b> of 2⁷¹ (≈2.36×10²¹) keys · <b>"+fmtTinyPct(pctCovered)+"</b> of the whole space";
 
   // Stats
   $("st-total").textContent = fmtNum(t.scanned);
@@ -1777,7 +1828,7 @@ function renderFrame(){
     const online = sharedDevices.filter(d=>now-(d.lastSeen||0)<60000);
     const totalSpeed = online.reduce((a,d)=>a+(d.speed||0),0);
     const coveredK = sharedDone.size * Math.pow(2, chunkBits);
-    const pct = coveredK / Math.pow(2,70) * 100;
+    const pct = coveredK / Math.pow(2,71) * 100;
     $("d-speed").innerHTML = fmtSpeedParts(totalSpeed);
     $("d-devices").textContent = online.length || 1;
     $("d-backend").textContent = "shared via Claude";
@@ -1786,6 +1837,11 @@ function renderFrame(){
     const tb=$("dev-rows");
     tb.innerHTML = (online.length?online:[{id:myDevId,type:deviceType(),speed:0}]).map(d=>"<tr><td>"+(d.name||d.id)+(d.id===myDevId?" (this)":"")+"</td><td>"+(d.type||"?")+"</td><td>—</td><td>—</td><td><span class='chip good'>online</span></td><td>"+fmtSpeed(d.speed||0)+"</td><td>searching</td></tr>").join("");
   }
+
+  // Segment progress across the WHOLE #72 range (2²⁵ segments). Source depends
+  // on mode: the coordinator's shared totals (connected), the Claude shared
+  // store (shared), or this browser's covered map (random), else local chunking.
+  renderSegments();
 
   // feasibility note (only when not showing a match)
   updateFeasNote(t.speed||avg);
@@ -1833,8 +1889,8 @@ function renderProjection(speed){
   const rows=[
     ["Assigned keyspace", Number(assigned).toExponential(3)+" keys"],
     ["At current speed", speed>0? fmtDur(Number(assigned)/speed):"—"],
-    ["Full #71 (2⁷⁰) at this speed", speed>0? fmtDur(Number(KEYSPACE)/speed):"—"],
-    ["Full #71, 50% expected", speed>0? fmtDur(Number(KEYSPACE)/speed/2):"—"],
+    ["Full #72 (2⁷¹) at this speed", speed>0? fmtDur(Number(KEYSPACE)/speed):"—"],
+    ["Full #72, 50% expected", speed>0? fmtDur(Number(KEYSPACE)/speed/2):"—"],
   ];
   el.innerHTML = rows.map(r=>"<dt>"+r[0]+"</dt><dd>"+r[1]+"</dd>").join("");
 }
@@ -1849,9 +1905,9 @@ function updateFeasNote(speed){
   const note=$("feasNote"); if(note.dataset.locked) return;
   if(speed>0){
     const full = Number(KEYSPACE)/speed;
-    note.innerHTML = "At the current measured <b>"+fmtSpeed(speed)+"</b>, exhausting the full 2⁷⁰ space of Puzzle&nbsp;#71 would take about <b>"+fmtDur(full)+"</b> on this device alone ("+fmtDur(full/2)+" for a 50% chance). This is a research tool — the odds are astronomically small.";
+    note.innerHTML = "At the current measured <b>"+fmtSpeed(speed)+"</b>, exhausting the full 2⁷¹ space of Puzzle&nbsp;#72 would take about <b>"+fmtDur(full)+"</b> on this device alone ("+fmtDur(full/2)+" for a 50% chance). This is a research tool — the odds are astronomically small.";
   } else {
-    note.innerHTML = "Puzzle&nbsp;#71 has a 2⁷⁰ keyspace (~1.18×10²¹ keys). Start a search to see live, measured throughput and an honest time estimate. Try <b>Demo</b> mode to watch the engine actually find a hidden key.";
+    note.innerHTML = "Puzzle&nbsp;#72 has a 2⁷¹ keyspace (~2.36×10²¹ keys). Start a search to see live, measured throughput and an honest time estimate. Try <b>Demo</b> mode to watch the engine actually find a hidden key.";
   }
 }
 
@@ -1889,7 +1945,7 @@ function drawChart(_, canvas){
 function fmtSpeedShort(k){ if(k>=1e9)return (k/1e9).toFixed(1)+"G"; if(k>=1e6)return (k/1e6).toFixed(1)+"M"; if(k>=1e3)return (k/1e3).toFixed(0)+"K"; return k.toFixed(0); }
 
 /* ---------------- sessions / history ---------------- */
-const LS_KEY="ludkey.sessions.v1";
+const LS_KEY="ludkey.sessions.72";
 let autosave=true;
 function loadSessions(){ try{ return JSON.parse(localStorage.getItem(LS_KEY)||"[]"); }catch(e){ return []; } }
 function saveSessions(arr){ try{ localStorage.setItem(LS_KEY, JSON.stringify(arr.slice(-100))); }catch(e){} }
@@ -1962,15 +2018,15 @@ $("mode").addEventListener("change", ()=>{ const m=$("mode").value; const demo=m
   $("connectedBox").hidden = !conn;
   $("sharedBox").hidden = !shr;
   $("searchHint").textContent = demo? "Demo mode hides a known key in a small window so you can watch a real match."
-    : rnd? "Random no-repeat: picks random 2^N-key segments of #71, remembers finished ones (saved in this browser), and never re-scans them."
+    : rnd? "Random no-repeat: picks random 2^N-key segments of #72, remembers finished ones (saved in this browser), and never re-scans them."
     : shr? "Shared via Claude: all devices on this artifact link search together over a shared segment map — no server to run."
     : conn? "Connected: this device joins a shared search run by your coordinator server — every device gets a different chunk, progress is combined."
-    : "Sequential: scans #71 in order and resumes from where it left off after a reload."; });
+    : "Sequential: scans #72 in order and resumes from where it left off after a reload."; });
 $("btn-clear-covered").addEventListener("click", ()=>{ if(running){ logEvent("warn","Stop the search before clearing covered history"); return; } doneChunks=new Set(); saveDone(); $("coveredText").textContent="Covered: 0 segments"; logEvent("info","Covered-segments history cleared"); });
-$("chunkbits").addEventListener("change", e=>{ try{ localStorage.setItem("ludkey.chunkbits", String(Math.max(16,Math.min(40,parseInt(e.target.value)||20)))); }catch(_){} });
+$("chunkbits").addEventListener("change", e=>{ try{ localStorage.setItem("ludkey.chunkbits.72", String(Math.max(16,Math.min(40,parseInt(e.target.value)||20)))); }catch(_){} });
 
 /* ---------------- backup / restore all progress ---------------- */
-const BACKUP_KEYS = ["ludkey.done.v2","ludkey.chunkbits","ludkey.resume.v1","ludkey.sessions.v1","ludkey.payout"];
+const BACKUP_KEYS = ["ludkey.done.72","ludkey.chunkbits.72","ludkey.resume.72","ludkey.sessions.72","ludkey.payout"];
 function buildBackup(){
   const o = { _app:"ludkey-hunter", _version:1, when:new Date().toISOString(), data:{} };
   for(const k of BACKUP_KEYS){ try{ const v=localStorage.getItem(k); if(v!=null) o.data[k]=v; }catch(_){} }
@@ -2024,6 +2080,7 @@ loadDone();
 $("chunkbits").value = chunkBits;
 $("coveredText").textContent = "Covered: "+doneChunks.size.toLocaleString()+" segments = "+fmtNum(Number(coveredKeys()))+" keys (saved)";
 renderHistory(); detectGPU(); runSelfTest(); updateFeasNote(0);
+$("mode").dispatchEvent(new Event("change")); // reflect default (collaborative) mode in the UI
 const startHash=location.hash.slice(1); if(titles[startHash]) switchView(startHash);
 requestAnimationFrame(render);
 logEvent("info","LudKey Hunter ready — CPU engine, "+(navigator.hardwareConcurrency||"?")+" threads available");

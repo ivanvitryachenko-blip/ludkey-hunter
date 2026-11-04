@@ -4,14 +4,14 @@
 
 import { CpuEngine } from "./src/cpuEngine.ts";
 import { fmtSpeed, fmtDuration } from "./src/stats.ts";
-import { PUZZLE_71, getTargetHash160, rangeSize } from "../core/src/puzzle.ts";
+import { PUZZLE_72, getTargetHash160, rangeSize } from "../core/src/puzzle.ts";
 
 const seconds = Number(process.argv[2] ?? 5);
 const windowSize = Number(process.argv[3] ?? 1024);
 
 const eng = new CpuEngine({
-  rangeStart: PUZZLE_71.rangeStart,
-  rangeEnd: PUZZLE_71.rangeEnd,
+  rangeStart: PUZZLE_72.rangeStart,
+  rangeEnd: PUZZLE_72.rangeEnd,
   target: getTargetHash160(), // real #71 target; will not match in a short scan
   windowSize,
   compressed: true,

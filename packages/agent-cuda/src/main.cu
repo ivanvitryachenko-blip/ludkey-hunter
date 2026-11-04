@@ -1,4 +1,4 @@
-// LudKey Hunter — CUDA reference agent for NVIDIA GPUs (puzzle #71 hash160 search).
+// LudKey Hunter — CUDA reference agent for NVIDIA GPUs (puzzle #72 hash160 search).
 //
 // VALIDATION STATUS: this source was NOT compiled or executed in the authoring
 // environment (no NVIDIA GPU / CUDA toolkit there). It is a correct-by-design
@@ -107,14 +107,14 @@ int main(int argc, char** argv) {
 
   if (!validate()) return 2; // honesty gate: never search on a GPU that computes wrong hashes
 
-  // Puzzle #71 target hash160 (checksum-verified in the TS core).
-  const char* TARGET_HEX = "f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8";
+  // Puzzle #72 target hash160 (checksum-verified in the TS core).
+  const char* TARGET_HEX = "bf7413e8df4e7a34ce9dc13e2f2648783ec54adb";
   uint8_t target[20]; for (int i = 0; i < 20; ++i) sscanf(TARGET_HEX + i*2, "%2x", (unsigned*)&target[i]);
 
-  // Demo/bench base: start of #71 range. A real run gets its base chunk from the
+  // Demo/bench base: start of #72 range. A real run gets its base chunk from the
   // coordination server (see README for the HTTP protocol; identical to the
   // Node agent). Here we benchmark raw throughput over a batch.
-  uint32_t base[8]; hexToKey("400000000000000000", base);
+  uint32_t base[8]; hexToKey("800000000000000000", base);
 
   uint32_t *dBase; uint8_t *dTarget; uint64_t *dFoundOff; int *dFoundFlag;
   cudaMalloc(&dBase, 8*4); cudaMalloc(&dTarget, 20); cudaMalloc(&dFoundOff, 8); cudaMalloc(&dFoundFlag, 4);
@@ -137,7 +137,7 @@ int main(int argc, char** argv) {
          (unsigned long long)BATCH, ms, rate / 1e6);
   if (flag) { uint64_t off; cudaMemcpy(&off, dFoundOff, 8, cudaMemcpyDeviceToHost);
     printf("*** MATCH at base+%llu ***\n", (unsigned long long)off); }
-  else printf("no match in this batch (expected — the batch is a vanishing fraction of 2^70)\n");
+  else printf("no match in this batch (expected — the batch is a vanishing fraction of 2^71)\n");
 
   printf("\nReference kernel = key*G from scratch per thread. The CPU engine's\n"
          "batch-addition trick (one modular inverse per window) is the documented\n"
