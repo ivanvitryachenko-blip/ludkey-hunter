@@ -458,7 +458,7 @@
             <button class="btn" id="bench-quick" type="button">▶ Quick (6s each)</button>
             <button class="btn ghost" id="bench-long" type="button">▶ Full (60s each)</button>
             <button class="btn" id="bench-auto" type="button">⚙ Auto-tune W</button>
-            <label class="field" style="margin:0;">GPU window W<select id="bench-w"><option value="8">8</option><option value="16">16</option><option value="32">32</option><option value="64" selected>64</option><option value="96">96</option><option value="128">128</option><option value="192">192</option><option value="256">256</option></select></label>
+            <label class="field" style="margin:0;">GPU window W<select id="bench-w"><option value="8">8</option><option value="16">16</option><option value="32">32</option><option value="64">64</option><option value="96" selected>96</option><option value="128">128</option><option value="192">192</option><option value="256">256</option></select></label>
             <span class="hint" id="bench-status"></span>
           </div>
           <p class="hint">Try several W values and keep the fastest on your device — larger W means one field inversion amortised over more keys, but more GPU memory per thread. The best W is device-specific (that's why it's measured, not fixed).</p>
@@ -2279,7 +2279,7 @@ function wireTools(){
 }
 // ---- Benchmark: measured CPU vs GPU throughput on this device (no fake numbers) ----
 // The GPU window size the real search uses, tuned per-device via the benchmark.
-function gpuW(){ try{ const v=parseInt(localStorage.getItem("ludkey.gpuW")); if(v>=1&&v<=256) return v; }catch(_){} return 64; }
+function gpuW(){ try{ const v=parseInt(localStorage.getItem("ludkey.gpuW")); if(v>=1&&v<=256) return v; }catch(_){} return 96; }
 let benchBusy=false;
 async function runGpuBench(seconds){
   const g=gpuEngine; const target=hexToBytes(PUZZLE.h160); // real target: never matches in a short run
