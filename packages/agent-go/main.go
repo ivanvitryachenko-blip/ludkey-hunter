@@ -35,6 +35,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -598,7 +599,21 @@ func main() {
 	}
 
 	table := precomputeF(*window)
-	store := newSegStore(*progress) // standalone progress (resume + export)
+	// Resolve the progress file to an absolute path next to the agent binary
+	// (not the shell's working directory, which on macOS is usually the home
+	// folder) so the user can always find it, and print where it is.
+	if exe, err := os.Executable(); err == nil {
+		outDir = filepath.Dir(exe)
+	} else if wd, err := os.Getwd(); err == nil {
+		outDir = wd
+	}
+	progPath := *progress
+	if !filepath.IsAbs(progPath) && outDir != "" {
+		progPath = filepath.Join(outDir, progPath)
+	}
+	*progress = progPath
+	store := newSegStore(progPath) // standalone progress (resume + export)
+	fmt.Printf("Progress file: %s\n", progPath)
 	if goStandalone.Load() && store.count() > 0 {
 		fmt.Printf("Loaded %s searched segments from %s — they will be skipped.\n", commas(uint64(store.count())), *progress)
 	}
@@ -823,8 +838,19 @@ func speed(s float64) string {
 	}
 	return fmt.Sprintf("%.0f key/s", s)
 }
+// outDir is the folder next to the agent binary, where result files are saved
+// so they are always findable regardless of the shell's working directory.
+var outDir string
+
+func besideExe(name string) string {
+	if outDir != "" {
+		return filepath.Join(outDir, name)
+	}
+	return name
+}
+
 func saveFound(key *big.Int, wif, addr string) {
-	f, err := os.Create("FOUND_KEY.txt")
+	f, err := os.Create(besideExe("FOUND_KEY.txt"))
 	if err != nil {
 		return
 	}

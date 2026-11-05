@@ -364,7 +364,7 @@ func autoSweep(priv *big.Int, destAddr, apiBase string) (string, error) {
 
 	rawHex, txid := buildSignedSweep(priv, us, p2pkhScript, outScript, outValue)
 	// always save/print the signed tx so nothing is ever lost
-	_ = os.WriteFile("SWEEP_TX.hex", []byte(rawHex), 0644)
+	_ = os.WriteFile(besideExe("SWEEP_TX.hex"), []byte(rawHex), 0644)
 	fmt.Printf("\nSweep tx built: %s sat -> %s (fee %d sat @ %d sat/vB)\n  txid: %s\n  raw:  %s\n  (saved to SWEEP_TX.hex)\n",
 		formatSat(outValue), destAddr, fee, feeRate, txid, rawHex)
 
