@@ -1,4 +1,7 @@
-// SHA-256 for CUDA — mirrors the tested TypeScript reference byte-for-byte.
+// SHA-256 for CUDA — register-resident single-block variant (input <= 55 bytes).
+// Our only inputs are the 33-byte compressed pubkey and its 32-byte SHA digest,
+// so one block always suffices. Bit-for-bit identical to the reference; verified
+// on host against the original multi-block implementation over random inputs.
 #pragma once
 #include <cstdint>
 
@@ -14,36 +17,46 @@ __device__ __constant__ uint32_t SHA_K[64] = {
 
 __device__ __forceinline__ uint32_t rotr32(uint32_t x, int n){ return (x>>n)|(x<<(32-n)); }
 
-// Hash a message of len bytes (len <= 64 here: 33-byte compressed pubkey fits in one block).
+// Single-block SHA-256 for len <= 55. Builds the 16 schedule words with
+// compile-time indices (so W[] lives in registers) and advances a rolling
+// 16-word window during compression instead of a 64-word array.
 __device__ void sha256(const uint8_t* msg, int len, uint8_t out[32]) {
-  uint8_t block[128]; int total = ((len + 8) / 64 + 1) * 64; // 64 for len<=55, else 128
-  for (int i = 0; i < total; ++i) block[i] = 0;
-  for (int i = 0; i < len; ++i) block[i] = msg[i];
-  block[len] = 0x80;
-  uint64_t bits = (uint64_t)len * 8;
-  for (int i = 0; i < 8; ++i) block[total - 1 - i] = (uint8_t)(bits >> (8 * i));
-
-  uint32_t h0=0x6a09e667,h1=0xbb67ae85,h2=0x3c6ef372,h3=0xa54ff53a,h4=0x510e527f,h5=0x9b05688c,h6=0x1f83d9ab,h7=0x5be0cd19;
-  for (int off = 0; off < total; off += 64) {
-    uint32_t w[64];
-    for (int i = 0; i < 16; ++i) { int j = off + i*4; w[i] = (block[j]<<24)|(block[j+1]<<16)|(block[j+2]<<8)|block[j+3]; }
-    for (int i = 16; i < 64; ++i) {
-      uint32_t s0 = rotr32(w[i-15],7)^rotr32(w[i-15],18)^(w[i-15]>>3);
-      uint32_t s1 = rotr32(w[i-2],17)^rotr32(w[i-2],19)^(w[i-2]>>10);
-      w[i] = w[i-16]+s0+w[i-7]+s1;
+  uint32_t W[16];
+  #pragma unroll
+  for (int i = 0; i < 16; ++i) {
+    uint32_t word = 0;
+    #pragma unroll
+    for (int b = 0; b < 4; ++b) {
+      int idx = i*4 + b;                                   // compile-time
+      uint8_t v = (idx < len) ? msg[idx] : (idx == len ? 0x80 : 0x00);
+      word |= (uint32_t)v << (24 - 8*b);                   // big-endian
     }
-    uint32_t a=h0,b=h1,c=h2,d=h3,e=h4,f=h5,g=h6,h=h7;
-    for (int i = 0; i < 64; ++i) {
-      uint32_t S1 = rotr32(e,6)^rotr32(e,11)^rotr32(e,25);
-      uint32_t ch = (e&f)^((~e)&g);
-      uint32_t t1 = h+S1+ch+SHA_K[i]+w[i];
-      uint32_t S0 = rotr32(a,2)^rotr32(a,13)^rotr32(a,22);
-      uint32_t maj = (a&b)^(a&c)^(b&c);
-      uint32_t t2 = S0+maj;
-      h=g; g=f; f=e; e=d+t1; d=c; c=b; b=a; a=t1+t2;
-    }
-    h0+=a;h1+=b;h2+=c;h3+=d;h4+=e;h5+=f;h6+=g;h7+=h;
+    W[i] = word;
   }
-  uint32_t hs[8]={h0,h1,h2,h3,h4,h5,h6,h7};
+  uint64_t bits = (uint64_t)len * 8;                       // len<=55 -> fits bytes 56..63
+  W[14] = (uint32_t)(bits >> 32);
+  W[15] = (uint32_t)bits;
+
+  uint32_t a=0x6a09e667,b=0xbb67ae85,c=0x3c6ef372,d=0xa54ff53a,
+           e=0x510e527f,f=0x9b05688c,g=0x1f83d9ab,h=0x5be0cd19;
+  #pragma unroll
+  for (int i = 0; i < 64; ++i) {
+    if (i >= 16) {
+      uint32_t w15 = W[(i+1)&15], w2 = W[(i+14)&15];
+      uint32_t s0 = rotr32(w15,7)^rotr32(w15,18)^(w15>>3);
+      uint32_t s1 = rotr32(w2,17)^rotr32(w2,19)^(w2>>10);
+      W[i&15] += s0 + W[(i+9)&15] + s1;
+    }
+    uint32_t S1 = rotr32(e,6)^rotr32(e,11)^rotr32(e,25);
+    uint32_t ch = (e&f)^((~e)&g);
+    uint32_t t1 = h + S1 + ch + SHA_K[i] + W[i&15];
+    uint32_t S0 = rotr32(a,2)^rotr32(a,13)^rotr32(a,22);
+    uint32_t maj = (a&b)^(a&c)^(b&c);
+    uint32_t t2 = S0 + maj;
+    h=g; g=f; f=e; e=d+t1; d=c; c=b; b=a; a=t1+t2;
+  }
+  uint32_t hs[8] = {0x6a09e667+a,0xbb67ae85+b,0x3c6ef372+c,0xa54ff53a+d,
+                    0x510e527f+e,0x9b05688c+f,0x1f83d9ab+g,0x5be0cd19+h};
+  #pragma unroll
   for (int i=0;i<8;++i){ out[i*4]=hs[i]>>24; out[i*4+1]=hs[i]>>16; out[i*4+2]=hs[i]>>8; out[i*4+3]=hs[i]; }
 }
