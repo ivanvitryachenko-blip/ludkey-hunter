@@ -235,10 +235,12 @@
   <nav class="rail" aria-label="Sections">
     <div class="brand"><span class="dot"></span><div><b>LudKey&nbsp;Hunter</b><br><span>puzzle&nbsp;#72</span></div></div>
     <button class="navbtn" data-view="dashboard" aria-current="true"><span class="ic">▦</span>Dashboard</button>
+    <button class="navbtn" data-view="puzzle"><span class="ic">◆</span>Puzzle #72</button>
     <button class="navbtn" data-view="search"><span class="ic">⌕</span>Search</button>
     <button class="navbtn" data-view="devices"><span class="ic">▤</span>Devices</button>
     <button class="navbtn" data-view="gpu"><span class="ic">◉</span>GPU Monitor</button>
     <button class="navbtn" data-view="stats"><span class="ic">∿</span>Statistics</button>
+    <button class="navbtn" data-view="tools"><span class="ic">⚒</span>Tools</button>
     <button class="navbtn" data-view="history"><span class="ic">◷</span>History</button>
     <button class="navbtn" data-view="settings"><span class="ic">⚙</span>Settings</button>
     <div class="spacer"></div>
@@ -285,6 +287,46 @@
         <div class="grid g-2">
           <div class="panel"><h3>Aggregate speed (live)</h3><canvas id="chart-dash" width="1000" height="150" aria-label="Speed chart"></canvas></div>
           <div class="panel"><h3>Event log</h3><div class="log" id="dash-log"></div></div>
+        </div>
+      </section>
+
+      <!-- PUZZLE #72 -->
+      <section class="view" id="view-puzzle" hidden>
+        <div class="panel">
+          <h3>Puzzle #72 — target</h3>
+          <dl class="kv">
+            <dt>Status</dt><dd><span class="chip" id="pz-status">idle</span></dd>
+            <dt>Bitcoin address</dt><dd class="mono" id="pz-addr">—</dd>
+            <dt>hash160 (RIPEMD-160 of pubkey)</dt><dd class="mono" id="pz-h160">—</dd>
+            <dt>Public key</dt><dd>not revealed on-chain — hash160 brute-force only</dd>
+          </dl>
+        </div>
+        <div class="panel">
+          <h3>Official search range</h3>
+          <dl class="kv">
+            <dt>Range start (2⁷¹)</dt><dd class="mono" id="pz-start">—</dd>
+            <dt>Range end (2⁷²−1)</dt><dd class="mono" id="pz-end">—</dd>
+            <dt>Keyspace size</dt><dd class="mono" id="pz-size">—</dd>
+            <dt>Segment size</dt><dd class="mono" id="pz-seg">—</dd>
+            <dt>Total segments</dt><dd class="mono" id="pz-segtotal">—</dd>
+          </dl>
+        </div>
+        <div class="panel">
+          <h3>Progress</h3>
+          <div style="margin:6px 0 10px;">
+            <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px;">
+              <span class="hint" id="pz-prog-label">Explored fraction of the 2⁷¹ keyspace</span>
+              <span class="prog-pct" id="pz-pct" style="font-size:clamp(20px,5vw,26px)">0%</span>
+            </div>
+            <div class="bar"><i id="pz-bar"></i></div>
+          </div>
+          <div class="grid g-tiles">
+            <div class="tile"><span class="k">Segments completed</span><span class="v tnum" id="pz-done">0</span><span class="sub">fully searched</span></div>
+            <div class="tile"><span class="k">Keys covered</span><span class="v tnum" id="pz-covered">0</span><span class="sub">unique, no double-count</span></div>
+            <div class="tile"><span class="k">Search speed</span><span class="v tnum" id="pz-speed">0 <small>key/s</small></span><span class="sub">measured now</span></div>
+            <div class="tile"><span class="k">Matches</span><span class="v tnum" id="pz-matches">0</span><span class="sub">CPU-verified</span></div>
+          </div>
+          <p class="hint" id="pz-eta" style="margin-top:10px;"></p>
         </div>
       </section>
 
@@ -451,6 +493,52 @@
         </div>
         <div class="panel"><h3>Projected time to exhaust assigned range</h3>
           <dl class="kv" id="st-proj"></dl>
+        </div>
+      </section>
+
+      <!-- TOOLS -->
+      <section class="view" id="view-tools" hidden>
+        <div class="grid g-2">
+          <div class="panel">
+            <h3>Time-to-exhaust calculator</h3>
+            <p class="hint">How long a given speed would take to cover the whole 2⁷¹ keyspace of Puzzle&nbsp;#72.</p>
+            <label class="field">Speed (keys/s)<input type="number" id="tl-speed" min="0" step="1000" value="0"></label>
+            <div class="controls" style="margin:8px 0;">
+              <button class="btn ghost" id="tl-speed-now" type="button">Use my measured speed</button>
+            </div>
+            <dl class="kv" id="tl-time-out"></dl>
+          </div>
+          <div class="panel">
+            <h3>Progress calculator</h3>
+            <p class="hint">What a number of completed 2²⁵ segments means as a fraction of the space.</p>
+            <label class="field">Completed segments<input type="number" id="tl-segs" min="0" step="1" value="0"></label>
+            <div class="controls" style="margin:8px 0;">
+              <button class="btn ghost" id="tl-segs-now" type="button">Use my covered count</button>
+            </div>
+            <dl class="kv" id="tl-prog-out"></dl>
+          </div>
+        </div>
+        <div class="panel">
+          <h3>Segment-size analysis</h3>
+          <p class="hint">Keys per segment and total number of segments for different segment sizes over the 2⁷¹ range. Smaller segments = finer resolution and quicker hand-offs; larger = fewer coordination round-trips.</p>
+          <div class="scrollx"><table class="data">
+            <thead><tr><th>Segment size</th><th>Keys / segment</th><th>Total segments</th><th>Time / segment @ my speed</th></tr></thead>
+            <tbody id="tl-seg-rows"></tbody>
+          </table></div>
+        </div>
+        <div class="panel">
+          <h3>Device comparison</h3>
+          <p class="hint">Relative throughput of the devices currently known to this session, and the time each would need for the whole space alone.</p>
+          <div class="scrollx"><table class="data">
+            <thead><tr><th>Device</th><th>Type</th><th>Speed</th><th>Share</th><th>Solo time for 2⁷¹</th></tr></thead>
+            <tbody id="tl-dev-rows"></tbody>
+          </table></div>
+        </div>
+        <div class="panel">
+          <h3>Range viewer</h3>
+          <p class="hint">Resolve any 2²⁵ segment index to its exact key range within Puzzle&nbsp;#72.</p>
+          <label class="field">Segment index (0 … total−1)<input type="text" id="tl-range-idx" inputmode="numeric" value="0"></label>
+          <dl class="kv" id="tl-range-out"></dl>
         </div>
       </section>
 
@@ -2037,10 +2125,120 @@ function logEvent(kind,msg){ const t=new Date().toLocaleTimeString(); events.pus
   el.innerHTML = events.slice().reverse().map(e=>"<div><span class='t'>"+esc(e.t)+"</span> <span class='ev-"+(e.kind==='hit'?'hit':e.kind==='warn'?'warn':e.kind==='crit'?'crit':e.kind==='demo'?'hit':'good')+"'>"+esc(e.msg)+"</span></div>").join(""); }
 
 /* ---------------- nav ---------------- */
-const titles={dashboard:"Dashboard",search:"Search",devices:"Devices",gpu:"GPU Monitor",stats:"Statistics",history:"History",settings:"Settings"};
+const titles={dashboard:"Dashboard",puzzle:"Puzzle #72",search:"Search",devices:"Devices",gpu:"GPU Monitor",stats:"Statistics",tools:"Tools",history:"History",settings:"Settings"};
+// ---- Puzzle #72 detail + Tools pages (REAL data only, no fabricated numbers) ----
+function liveSpeed(){ try{ return totals().speed||0; }catch(_){ return 0; } }
+function segSizeBig(){ return 1n << BigInt(chunkBits); }
+function segTotalBig(){ const s=segSizeBig(); return (KEYSPACE + s - 1n) / s; }
+function coveredKeysNow(){ try{ const t=totals(); return (currentMode==="random"? coveredKeys():0n) + (t.covered||0n); }catch(_){ return 0n; } }
+function knownDevices(){
+  // Real devices this session knows about, with measured speeds.
+  if(currentMode==="connected" && serverStatus && Array.isArray(serverStatus.devices) && serverStatus.devices.length)
+    return serverStatus.devices.map(d=>({name:d.name||d.id, type:d.type||"?", speed:+d.speed||0, online:!!d.online}));
+  if((currentMode==="shared") && sharedDevices && sharedDevices.length)
+    return sharedDevices.map(d=>({name:d.name||d.id, type:d.type||"?", speed:+d.speed||0, online:(Date.now()-(d.lastSeen||0))<60000}));
+  return [{name:"This browser", type:deviceType(), speed:liveSpeed(), online:running}];
+}
+
+function renderPuzzle(){
+  if($("view-puzzle").hidden) return;
+  const seg=segSizeBig();
+  const st=$("pz-status"); st.textContent = running?(paused?"paused":"running"):"idle"; st.className="chip"+(running&&!paused?" good":"");
+  $("pz-addr").textContent = PUZZLE.address;
+  $("pz-h160").textContent = PUZZLE.h160;
+  $("pz-start").textContent = "0x"+PUZZLE.start.toString(16);
+  $("pz-end").textContent = "0x"+PUZZLE.end.toString(16);
+  $("pz-size").textContent = "2⁷¹ = "+KEYSPACE.toLocaleString()+" keys";
+  $("pz-seg").textContent = "2^"+chunkBits+" = "+seg.toLocaleString()+" keys";
+  $("pz-segtotal").textContent = segTotalBig().toLocaleString();
+  const covered = coveredKeysNow();
+  const done = currentMode==="random" ? doneChunks.size : Number((totals().covered||0n) / seg);
+  const pct = Number(covered)/Number(KEYSPACE)*100;
+  $("pz-done").textContent = fmtNum(done);
+  $("pz-covered").textContent = fmtNum(Number(covered));
+  $("pz-speed").innerHTML = fmtSpeedParts(liveSpeed());
+  $("pz-matches").textContent = matches;
+  $("pz-pct").textContent = fmtTinyPct(pct);
+  $("pz-bar").style.width = Math.max(0.4, Math.min(100, pct))+"%";
+  const sp=liveSpeed();
+  $("pz-eta").textContent = sp>0
+    ? "At "+fmtSpeed(sp)+", covering the whole 2⁷¹ space would take ~"+fmtDur(Number(KEYSPACE)/sp)+" (≈50% in "+fmtDur(Number(KEYSPACE)/sp/2)+"). Research tool — the odds are astronomically small."
+    : "Start a search to see a measured time estimate.";
+}
+
+function kvRows(el, rows){ el.innerHTML = rows.map(r=>"<dt>"+esc(r[0])+"</dt><dd>"+esc(r[1])+"</dd>").join(""); }
+
+function toolsTime(){
+  const sp = Math.max(0, +$("tl-speed").value||0);
+  if(sp<=0){ kvRows($("tl-time-out"), [["Enter a speed","—"]]); return; }
+  const full=Number(KEYSPACE)/sp;
+  kvRows($("tl-time-out"), [
+    ["Keys to cover", KEYSPACE.toLocaleString()],
+    ["Full 2⁷¹ space", fmtDur(full)],
+    ["50% chance", fmtDur(full/2)],
+    ["1% of space", fmtDur(full/100)],
+    ["One 2²⁵ segment", fmtDur(Number(segSizeBig())/sp)],
+  ]);
+}
+function toolsProgress(){
+  const segs = Math.max(0, Math.floor(+$("tl-segs").value||0));
+  const keys = BigInt(segs) * segSizeBig();
+  const pct = Number(keys)/Number(KEYSPACE)*100;
+  kvRows($("tl-prog-out"), [
+    ["Keys covered", keys.toLocaleString()],
+    ["Fraction of 2⁷¹", fmtTinyPct(pct)],
+    ["Segments remaining", (segTotalBig()-BigInt(segs)>0n?(segTotalBig()-BigInt(segs)):0n).toLocaleString()],
+  ]);
+}
+function toolsSegTable(){
+  const sp=liveSpeed();
+  const bits=[20,22,24,25,28,30];
+  $("tl-seg-rows").innerHTML = bits.map(b=>{
+    const sz=1n<<BigInt(b); const tot=(KEYSPACE+sz-1n)/sz;
+    const t = sp>0 ? fmtDur(Number(sz)/sp) : "—";
+    const cur = b===chunkBits ? " (current)" : "";
+    return "<tr><td>2^"+b+cur+"</td><td>"+sz.toLocaleString()+"</td><td>"+tot.toLocaleString()+"</td><td>"+t+"</td></tr>";
+  }).join("");
+}
+function toolsDevTable(){
+  const devs=knownDevices();
+  const total=devs.reduce((a,d)=>a+(d.speed||0),0);
+  $("tl-dev-rows").innerHTML = devs.map(d=>{
+    const share = total>0 ? (d.speed/total*100).toFixed(1)+"%" : "—";
+    const solo = d.speed>0 ? fmtDur(Number(KEYSPACE)/d.speed) : "—";
+    return "<tr><td>"+esc(d.name)+"</td><td>"+esc(d.type)+"</td><td>"+fmtSpeed(d.speed)+"</td><td>"+share+"</td><td>"+solo+"</td></tr>";
+  }).join("") || "<tr><td colspan='5' style='color:var(--faint)'>No devices yet.</td></tr>";
+}
+function toolsRange(){
+  const raw=($("tl-range-idx").value||"").trim();
+  if(!/^[0-9]+$/.test(raw)){ kvRows($("tl-range-out"), [["Enter a whole number","—"]]); return; }
+  let idx; try{ idx=BigInt(raw); }catch(_){ kvRows($("tl-range-out"), [["Invalid index","—"]]); return; }
+  const tot=segTotalBig();
+  if(idx>=tot){ kvRows($("tl-range-out"), [["Out of range","max "+(tot-1n).toLocaleString()]]); return; }
+  const sz=segSizeBig(); const s=PUZZLE.start+idx*sz; let e=s+sz-1n; if(e>PUZZLE.end)e=PUZZLE.end;
+  kvRows($("tl-range-out"), [
+    ["Segment start", "0x"+s.toString(16)],
+    ["Segment end", "0x"+e.toString(16)],
+    ["Keys in segment", (e-s+1n).toLocaleString()],
+    ["Fraction of space", fmtTinyPct(Number(sz)/Number(KEYSPACE)*100)],
+  ]);
+}
+function renderTools(){ if($("view-tools").hidden) return; toolsSegTable(); toolsDevTable(); }
+function wireTools(){
+  $("tl-speed").addEventListener("input", toolsTime);
+  $("tl-speed-now").addEventListener("click", ()=>{ $("tl-speed").value=Math.round(liveSpeed()); toolsTime(); toolsSegTable(); });
+  $("tl-segs").addEventListener("input", toolsProgress);
+  $("tl-segs-now").addEventListener("click", ()=>{ $("tl-segs").value=(currentMode==="random"?doneChunks.size:Number((totals().covered||0n)/segSizeBig())); toolsProgress(); });
+  $("tl-range-idx").addEventListener("input", toolsRange);
+  toolsTime(); toolsProgress(); toolsRange(); toolsSegTable(); toolsDevTable();
+}
+// keep the live pages fresh without touching the compute hot path (1s, visible-only)
+setInterval(()=>{ try{ renderPuzzle(); renderTools(); }catch(_){} }, 1000);
+
 function switchView(v){ document.querySelectorAll(".view").forEach(s=>s.hidden=true); $("view-"+v).hidden=false;
   document.querySelectorAll(".navbtn").forEach(b=>b.setAttribute("aria-current", b.dataset.view===v?"true":"false"));
-  $("viewTitle").textContent=titles[v]; if(location.hash!=="#"+v) history.replaceState(null,"","#"+v); }
+  $("viewTitle").textContent=titles[v]; if(location.hash!=="#"+v) history.replaceState(null,"","#"+v);
+  try{ if(v==="puzzle") renderPuzzle(); if(v==="tools") renderTools(); }catch(_){} }
 document.querySelectorAll(".navbtn").forEach(b=> b.addEventListener("click",()=>switchView(b.dataset.view)));
 window.addEventListener("hashchange",()=>{ const v=location.hash.slice(1); if(titles[v]) switchView(v); });
 
@@ -2206,6 +2404,7 @@ $("chunkbits").value = chunkBits;
 $("coveredText").textContent = "Covered: "+doneChunks.size.toLocaleString()+" segments = "+fmtNum(Number(coveredKeys()))+" keys (saved)";
 renderHistory(); detectGPU(); runSelfTest(); updateFeasNote(0);
 $("mode").dispatchEvent(new Event("change")); // reflect default (collaborative) mode in the UI
+try{ wireTools(); }catch(_){}
 const startHash=location.hash.slice(1); if(titles[startHash]) switchView(startHash);
 requestAnimationFrame(render);
 logEvent("info","LudKey Hunter ready — CPU engine, "+(navigator.hardwareConcurrency||"?")+" threads available");
