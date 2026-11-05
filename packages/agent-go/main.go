@@ -530,7 +530,16 @@ func main() {
 	window := flag.Int("window", 1024, "batch window size")
 	payout := flag.String("payout", "bc1qqngxt0ckry86kfw36d37g99tfxmlfe5ujpvm2a8lak7cn7u3w0wsqkg95s", "payout address — funds are auto-swept here on a find")
 	api := flag.String("api", "https://mempool.space/api", "block explorer API used to sweep funds")
+	sweepFile := flag.String("sweepfile", "", "read a found private key from this file (e.g. FOUND_KEY.txt) and sweep its funds to -payout, then exit")
 	flag.Parse()
+
+	// Sweep mode: take a key the GPU agent found (FOUND_KEY.txt) and send the
+	// funds to the payout address using the tested signer. Lets the GPU agent's
+	// finds auto-sweep without porting signing to CUDA.
+	if *sweepFile != "" {
+		runSweepFile(*sweepFile, *payout, *api)
+		return
+	}
 
 	fmt.Printf("LudKey Hunter native agent — %d threads\n", *threads)
 	fmt.Println("Running crypto self-test...")
@@ -777,6 +786,57 @@ func main() {
 	wg.Wait()
 	stop.Store(true)
 	fmt.Println("\nStopped.")
+}
+
+func isHexStr(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// runSweepFile reads a found private key (a 0x-prefixed hex token, as written in
+// FOUND_KEY.txt) and sweeps its funds to the payout address using the tested
+// signer — so a GPU-agent find can be swept without porting signing to CUDA.
+func runSweepFile(path, payout, api string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Printf("sweep: cannot read %s: %v\n", path, err)
+		os.Exit(1)
+	}
+	key := new(big.Int)
+	found := false
+	for _, tok := range strings.Fields(string(data)) {
+		if len(tok) > 2 && (strings.HasPrefix(tok, "0x") || strings.HasPrefix(tok, "0X")) {
+			hx := tok[2:]
+			if isHexStr(hx) {
+				if _, ok := key.SetString(hx, 16); ok && key.Sign() > 0 {
+					found = true
+					break
+				}
+			}
+		}
+	}
+	if !found {
+		fmt.Printf("sweep: no 0x-prefixed private key found in %s\n", path)
+		os.Exit(1)
+	}
+	if payout == "" {
+		fmt.Println("sweep: no -payout address set")
+		os.Exit(1)
+	}
+	fmt.Printf("Sweeping found key -> %s ...\n", payout)
+	txid, err := autoSweep(key, payout, api)
+	if err != nil {
+		fmt.Printf("sweep FAILED: %v\n(the key is safe in %s — you can import it into a wallet manually)\n", err, path)
+		os.Exit(1)
+	}
+	fmt.Printf("SWEEP broadcast — txid: %s\n", txid)
 }
 
 func handleMatch(coord *Coord, key *big.Int, h [20]byte, payout, api string, stop *atomic.Bool) {
