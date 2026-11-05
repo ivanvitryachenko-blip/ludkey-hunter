@@ -1075,8 +1075,9 @@ function h160ToWords(bytes) { const w = new Uint32Array(5); for (let i = 0; i < 
 class WebGPUSearch {
   constructor(W, WG) { this.device = null; this.pipeline = null; this.ok = false; this.W = (W|0) || 16; this.WG = (WG|0) || 64; }
 
-  async init() {
+  async init(skipSelfTest) {
     if (!("gpu" in navigator)) return { ok: false, reason: "WebGPU not available in this browser" };
+    this.pbuf = null; this.bind = null; // buffers belong to a device; recreate them for the new device
     let adapter;
     try { adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" }); }
     catch (e) { return { ok: false, reason: "requestAdapter failed: " + e.message }; }
@@ -1084,7 +1085,7 @@ class WebGPUSearch {
     this.device = await adapter.requestDevice();
     // If the GPU device is lost (backgrounding, driver reset, thermal), mark the
     // engine not-ok so the next search re-initialises or falls back to CPU.
-    try { this.device.lost.then((info) => { this.ok = false; this.pipeline = null; this.lostReason = (info && info.reason) || "device lost"; }); } catch (_) {}
+    try { this.device.lost.then((info) => { this.ok = false; this.pipeline = null; this.pbuf = null; this.bind = null; this.lostReason = (info && info.reason) || "device lost"; }); } catch (_) {}
     try {
       const module = this.device.createShaderModule({ code: buildSearchWGSL(this.W, this.WG) });
       // surface compile errors early
@@ -1108,6 +1109,9 @@ class WebGPUSearch {
       this.device.queue.writeBuffer(this.deltaBuf, 0, dtbl);
     } catch (e) { return { ok: false, reason: "pipeline creation failed: " + e.message }; }
     this.adapterInfo = adapter.info || {};
+    // On a re-init after device loss, the crypto already passed its self-test
+    // this session on this GPU, so skip the (heavy) re-validation to recover fast.
+    if (skipSelfTest) { this.ok = true; return { ok: true, reason: "re-init", adapter: this.adapterInfo }; }
     const st = await this.selfTest();
     this.ok = st.ok;
     return st;
@@ -1117,6 +1121,13 @@ class WebGPUSearch {
   // Buffers, bind group and the params array are created ONCE and reused across
   // every dispatch (Stage 7 — no per-dispatch allocation or teardown).
   async searchBatch(baseKey, targetBytes, count) {
+    // If the device/pipeline was lost (e.g. the tab was backgrounded on iOS, or
+    // a thermal/driver reset), transparently re-acquire them instead of crashing
+    // with "setPipeline must be an instance of GPUComputePipeline".
+    if (!this.pipeline || !this.device) {
+      const st = await this.init(true); // fast re-acquire (self-test already passed this session)
+      if (!st.ok) throw new Error("GPU unavailable: " + (st.reason || "device lost"));
+    }
     if (!this.pbuf) {
       this.pbuf = this.device.createBuffer({ size: 22 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       this.rbuf = this.device.createBuffer({ size: 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
