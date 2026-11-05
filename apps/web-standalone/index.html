@@ -287,8 +287,16 @@
                 <label class="field">Range end (hex)<input type="text" id="rend" value="ffffffffffffffffff"></label>
               </div>
               <div class="grid pair2" style="grid-template-columns:1fr 1fr; gap:10px;">
-                <label class="field">Workers (threads)<input type="number" id="workers" min="1" max="32" value="2"></label>
+                <label class="field">Workers (threads)<input type="number" id="workers" min="1" max="30" value="2"></label>
                 <label class="field">Window size<input type="number" id="window" min="64" max="8192" step="64" value="1024"></label>
+              </div>
+              <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                <button class="btn ghost" id="btn-bench" type="button" style="padding:6px 12px;">⚡ Benchmark &amp; auto-tune</button>
+                <span class="hint" id="bench-status" style="flex:1; min-width:120px;"></span>
+              </div>
+              <div id="bench-box" hidden style="border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:12.5px;">
+                <div class="hint" id="bench-dev" style="margin-bottom:6px;"></div>
+                <table style="width:100%; border-collapse:collapse;"><thead><tr style="text-align:left; color:var(--faint);"><th>Workers</th><th>Speed</th><th></th></tr></thead><tbody id="bench-rows"></tbody></table>
               </div>
               <label class="field">Compute backend
                 <select id="backend">
@@ -2112,9 +2120,61 @@ $("set-autosave").addEventListener("change", e=>{ autosave=e.target.checked; });
 $("payout").addEventListener("change", e=>{ try{ localStorage.setItem("ludkey.payout", e.target.value.trim()); }catch(_){} });
 try{ const sp=localStorage.getItem("ludkey.payout"); if(sp) $("payout").value=sp; }catch(_){}
 
+/* ---------------- device benchmark + worker auto-tune ---------------- */
+// Runs the real CPU engine at increasing worker counts on a dummy range and
+// picks the count with the best measured throughput (diminishing returns), so
+// the worker count is tuned per device (phone, M-series Mac, etc.) by real
+// measurement, not guesswork.
+function benchOnce(k, ms){
+  return new Promise(resolve=>{
+    const ws=[], sc=new Array(k).fill(0), t0=performance.now();
+    for(let i=0;i<k;i++){
+      const w=new Worker(workerBlobUrl);
+      const start=(1n<<71n)+BigInt(i)*(1n<<48n), end=start+(1n<<46n); // disjoint dummy ranges
+      w.onmessage=(e)=>{ const m=e.data; if(m.type==="progress") sc[i]=m.scanned; };
+      w.postMessage({ type:"start", id:i, start:"0x"+start.toString(16), end:"0x"+end.toString(16),
+        target:"ffffffffffffffffffffffffffffffffffffffff", windowSize:1024, compressed:true });
+      ws.push(w);
+    }
+    setTimeout(()=>{ const dt=(performance.now()-t0)/1000;
+      ws.forEach(w=>{ try{ w.postMessage({type:"stop"}); w.terminate(); }catch(_){} });
+      resolve(sc.reduce((a,b)=>a+b,0)/dt); }, ms);
+  });
+}
+async function runBenchmark(){
+  if(running){ $("bench-status").textContent="Stop the search before benchmarking."; return; }
+  const btn=$("btn-bench"); btn.disabled=true;
+  const cores=navigator.hardwareConcurrency||4;
+  const mem=navigator.deviceMemory? navigator.deviceMemory+" GB" : "unknown";
+  $("bench-dev").innerHTML="Device: <b>"+deviceType()+"</b> · cores <b>"+cores+"</b> · memory <b>"+mem
+    +"</b> · WebGPU <b>"+(webgpuPresent?"yes":"no")+"</b>";
+  let counts=[1,2,4,8,12,16,20,30].filter(c=>c<=Math.max(cores+2,4));
+  if(!counts.includes(cores)) counts.push(cores);
+  counts=[...new Set(counts)].sort((a,b)=>a-b);
+  $("bench-box").hidden=false; $("bench-rows").innerHTML="";
+  const results=[];
+  for(const k of counts){
+    $("bench-status").textContent="Testing "+k+" worker"+(k>1?"s":"")+"…";
+    const kps=await benchOnce(k, 700);
+    results.push({k,kps});
+    $("bench-rows").innerHTML=results.map(r=>"<tr><td>"+r.k+"</td><td>"+fmtSpeed(r.kps)+"</td><td></td></tr>").join("");
+  }
+  const maxk=Math.max(...results.map(r=>r.kps));
+  // smallest worker count within 3% of the best throughput (avoid needless heat)
+  const best=results.filter(r=>r.kps>=maxk*0.97).sort((a,b)=>a.kps-b.kps)[0] || results.sort((a,b)=>b.kps-a.kps)[0];
+  const pick=results.reduce((p,r)=>r.kps>=maxk*0.97 && r.k<p.k ? r : p, {k:1e9}).k;
+  const chosen = isFinite(pick)? pick : best.k;
+  $("workers").value=chosen; $("set-workers").value=chosen;
+  $("bench-rows").innerHTML=results.map(r=>"<tr><td>"+r.k+"</td><td>"+fmtSpeed(r.kps)+"</td><td>"+(r.k===chosen?"<span class='chip good'>chosen</span>":(r.kps===maxk?"<span class='chip'>peak</span>":""))+"</td></tr>").join("");
+  $("bench-status").textContent="Auto-tuned to "+chosen+" workers · peak "+fmtSpeed(maxk);
+  logEvent("good","Benchmark: auto-tuned to "+chosen+" workers (peak "+fmtSpeed(maxk)+" on "+cores+"-core "+deviceType()+")");
+  btn.disabled=false;
+}
+$("btn-bench").addEventListener("click", runBenchmark);
+
 /* init */
 $("s-addr").textContent=PUZZLE.address; $("s-h160").textContent=PUZZLE.h160;
-$("workers").value = Math.min(4, navigator.hardwareConcurrency||2);
+$("workers").value = Math.min(30, navigator.hardwareConcurrency||2);
 $("set-workers").value = $("workers").value;
 loadDone();
 $("chunkbits").value = chunkBits;
