@@ -36,6 +36,34 @@ const PUZZLE = {
 };
 const DEFAULT_CHUNK_BITS = 25n;   // 2^25 keys per segment (task spec)
 const LEASE_MS = 10 * 60 * 1000;  // 10 minutes
+// Abuse limits: cap total registered devices and throttle registration per IP
+// so nobody can flood the coordinator with devices (storage/DoS abuse).
+const MAX_DEVICES = 10000;
+const REGISTER_WINDOW_MS = 60 * 1000;
+const REGISTER_MAX_PER_IP = 20;     // registrations per IP per minute
+const MAX_BODY_BYTES = 16 * 1024;   // request bodies are tiny JSON; reject larger
+
+// Constant-time string compare, so token checks don't leak length/prefix via
+// timing. Both sides are compared over the longer length.
+function timingSafeEqual(a, b) {
+  a = String(a); b = String(b);
+  let diff = a.length ^ b.length;
+  const n = Math.max(a.length, b.length);
+  for (let i = 0; i < n; i++) diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+  return diff === 0;
+}
+
+// Parse a chunk index from untrusted input: must be a non-negative integer
+// string within [0, chunkCount). Returns a BigInt or null (-> 400).
+function parseChunkIndex(v, chunkCount) {
+  if (typeof v !== "string" && typeof v !== "number") return null;
+  const s = String(v);
+  if (!/^[0-9]+$/.test(s)) return null;
+  let n;
+  try { n = BigInt(s); } catch { return null; }
+  if (n < 0n || n >= chunkCount) return null;
+  return n;
+}
 
 // ---------------------------------------------------------------------------
 // RangeAllocator — ported verbatim from packages/server/src/allocator.ts.
@@ -196,6 +224,7 @@ export class Coordinator {
     this.env = env;
     this.allocator = null;
     this.devices = new Map();
+    this.ipHits = new Map(); // ip -> [timestamps] for register rate limiting (in-memory)
     this.chunkSize = 1n << (env.CHUNK_BITS ? BigInt(env.CHUNK_BITS) : DEFAULT_CHUNK_BITS);
     // Load persisted state before serving any request. load() never throws, so
     // the Durable Object always constructs and never returns an empty response.
@@ -235,8 +264,17 @@ export class Coordinator {
     const h = req.headers.get("authorization") || "";
     const m = /^Bearer\s+(.+)$/.exec(h);
     if (!m) return null;
-    for (const d of this.devices.values()) if (d.token === m[1]) return d;
+    for (const d of this.devices.values()) if (timingSafeEqual(d.token, m[1])) return d;
     return null;
+  }
+
+  // Sliding-window per-IP rate limit for registration. Returns true if allowed.
+  rateOkRegister(ip, now = Date.now()) {
+    const arr = (this.ipHits.get(ip) || []).filter((t) => now - t < REGISTER_WINDOW_MS);
+    if (arr.length >= REGISTER_MAX_PER_IP) { this.ipHits.set(ip, arr); return false; }
+    arr.push(now); this.ipHits.set(ip, arr);
+    if (this.ipHits.size > 5000) { for (const [k, v] of this.ipHits) if (!v.some((t) => now - t < REGISTER_WINDOW_MS)) this.ipHits.delete(k); }
+    return true;
   }
 
   async fetch(req) {
@@ -265,10 +303,15 @@ export class Coordinator {
         });
       }
       if (path === "/api/register" && method === "POST") {
+        const ip = req.headers.get("cf-connecting-ip") || req.headers.get("x-forwarded-for") || "unknown";
+        if (!this.rateOkRegister(ip)) return json({ error: "rate limited" }, 429);
+        if (this.devices.size >= MAX_DEVICES) return json({ error: "device limit reached" }, 429);
         const b = await body(req);
         const id = "dev_" + hex(6);
         const token = hex(24);
-        const d = { id, token, name: String(b.name || id), type: String(b.type || "unknown"), gpu: b.gpu ? String(b.gpu) : undefined, createdAt: Date.now(), lastSeen: Date.now(), scanned: "0", speed: 0 };
+        // Clamp attacker-controlled display strings so one device can't bloat
+        // state or carry absurd payloads (also escaped again in the UI).
+        const d = { id, token, name: String(b.name || id).slice(0, 64), type: String(b.type || "unknown").slice(0, 32), gpu: b.gpu ? String(b.gpu).slice(0, 64) : undefined, createdAt: Date.now(), lastSeen: Date.now(), scanned: "0", speed: 0 };
         this.devices.set(id, d); await this.persist();
         return json({ deviceId: id, token });
       }
@@ -286,24 +329,39 @@ export class Coordinator {
       }
       if (path === "/api/heartbeat" && method === "POST") {
         const b = await body(req);
-        dev.speed = Number(b.speed || 0); dev.scanned = String(b.scanned || dev.scanned);
-        if (b.chunkIndex !== undefined) this.allocator.renew(BigInt(b.chunkIndex), dev.id, b.chunkScanned !== undefined ? BigInt(b.chunkScanned) : undefined);
+        dev.speed = Number(b.speed || 0); dev.scanned = String(b.scanned || dev.scanned).slice(0, 40);
+        if (b.chunkIndex !== undefined) {
+          const idx = parseChunkIndex(b.chunkIndex, this.allocator.chunkCount);
+          if (idx === null) return json({ error: "bad chunkIndex" }, 400);
+          let sc; if (b.chunkScanned !== undefined) { try { sc = BigInt(String(b.chunkScanned)); if (sc < 0n) sc = undefined; } catch { sc = undefined; } }
+          this.allocator.renew(idx, dev.id, sc);
+        }
         return json({ ok: true });
       }
       if (path === "/api/complete" && method === "POST") {
         const b = await body(req);
-        const ok = this.allocator.complete(BigInt(b.chunkIndex), dev.id); await this.persist();
+        const idx = parseChunkIndex(b.chunkIndex, this.allocator.chunkCount);
+        if (idx === null) return json({ error: "bad chunkIndex" }, 400);
+        const ok = this.allocator.complete(idx, dev.id); await this.persist();
         return json({ ok });
       }
       if (path === "/api/release" && method === "POST") {
         const b = await body(req);
-        const ok = this.allocator.release(BigInt(b.chunkIndex), dev.id); await this.persist();
+        const idx = parseChunkIndex(b.chunkIndex, this.allocator.chunkCount);
+        if (idx === null) return json({ error: "bad chunkIndex" }, 400);
+        const ok = this.allocator.release(idx, dev.id); await this.persist();
         return json({ ok });
       }
       if (path === "/api/match" && method === "POST") {
         const b = await body(req);
-        // Stored ONLY in private DO storage; never returned by any endpoint.
-        await this.ctx.storage.put("FOUND_KEY", JSON.stringify({ when: new Date().toISOString(), device: dev.id, key: b.key, hash160: b.hash160, address: b.address }));
+        // Integrity: only accept a report whose hash160 actually matches the
+        // puzzle target, so a griefer can't clobber a real find with junk.
+        if (String(b.hash160 || "").toLowerCase() !== PUZZLE.hash160) return json({ ok: false, error: "hash160 does not match target" }, 400);
+        // SECURITY: the private key is NEVER accepted or stored server-side. It
+        // stays on the finder's device (local file + auto-sweep). We record only
+        // a non-secret notice, and never overwrite an existing one.
+        const existing = await this.ctx.storage.get("FOUND_KEY");
+        if (!existing) await this.ctx.storage.put("FOUND_KEY", JSON.stringify({ when: new Date().toISOString(), device: dev.id, hash160: PUZZLE.hash160, address: PUZZLE.address }));
         return json({ ok: true, stored: true });
       }
       return json({ error: "not found" }, 404);
@@ -348,10 +406,37 @@ export default {
       }
     }
     if (url.pathname === "/" || url.pathname === "/index.html") {
-      return new Response(APP_HTML, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+      return new Response(APP_HTML, { status: 200, headers: { "content-type": "text/html; charset=utf-8", ...SECURITY_HEADERS, "content-security-policy": CSP } });
     }
-    return new Response("Not found", { status: 404 });
+    return new Response("Not found", { status: 404, headers: SECURITY_HEADERS });
   },
+};
+
+// ---- security headers ----
+// Content-Security-Policy for the served app. The app is a single HTML file
+// with inline <script>/<style> (hence 'unsafe-inline') and Web Workers from
+// blob: URLs. connect-src allows same-origin plus any https coordinator the
+// user points a standalone UI at. frame-ancestors 'none' blocks clickjacking.
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self' data:",
+  "connect-src 'self' https:",
+  "worker-src 'self' blob:",
+  "child-src 'self' blob:",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join("; ");
+const SECURITY_HEADERS = {
+  "strict-transport-security": "max-age=31536000; includeSubDomains",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
+  "referrer-policy": "no-referrer",
+  "permissions-policy": "geolocation=(), camera=(), microphone=(), payment=(), usb=()",
 };
 
 // ---- helpers ----
@@ -363,9 +448,21 @@ function cors(res) {
   h.set("access-control-allow-origin", "*");
   h.set("access-control-allow-headers", "authorization,content-type");
   h.set("access-control-allow-methods", "GET,POST,OPTIONS");
+  h.set("access-control-max-age", "86400");
+  // Baseline hardening on every response (HSTS forces TLS, nosniff stops MIME
+  // sniffing, no-referrer avoids leaking the token-bearing URL).
+  for (const [k, v] of Object.entries(SECURITY_HEADERS)) h.set(k, v);
   return new Response(res.body, { status: res.status, headers: h });
 }
-async function body(req) { try { return await req.json(); } catch { return {}; } }
+async function body(req) {
+  const len = Number(req.headers.get("content-length") || 0);
+  if (len > MAX_BODY_BYTES) return {}; // oversized -> treated as empty, never parsed
+  try {
+    const txt = await req.text();
+    if (txt.length > MAX_BODY_BYTES) return {};
+    return txt ? JSON.parse(txt) : {};
+  } catch { return {}; }
+}
 // Uniform-ish random bigint in [0, n). n is the segment count (~2^46), so 96
 // random bits make the modulo bias negligible.
 function randBelow(n) {

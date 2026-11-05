@@ -46,4 +46,15 @@ jobs:
           curl -fsS -X POST -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d '{}' "$BASE/api/lease" ; echo
           echo "=== GET / (first 120 chars) ==="
           curl -fsS "$BASE/" | head -c 120 ; echo
+          echo "=== security headers on / ==="
+          H=$(curl -fsSI "$BASE/")
+          echo "$H" | grep -iq "content-security-policy"      || { echo "MISSING CSP"; exit 1; }
+          echo "$H" | grep -iq "strict-transport-security"    || { echo "MISSING HSTS"; exit 1; }
+          echo "$H" | grep -iq "x-frame-options: *deny"       || { echo "MISSING X-Frame-Options"; exit 1; }
+          echo "$H" | grep -iq "x-content-type-options: *nosniff" || { echo "MISSING nosniff"; exit 1; }
+          echo "security headers present"
+          echo "=== input validation: bad chunkIndex must be 400 ==="
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d '{"chunkIndex":"abc"}' "$BASE/api/complete")
+          [ "$CODE" = "400" ] || { echo "expected 400 for bad chunkIndex, got $CODE"; exit 1; }
+          echo "bad chunkIndex -> 400 OK"
           echo "VERIFY-OK"

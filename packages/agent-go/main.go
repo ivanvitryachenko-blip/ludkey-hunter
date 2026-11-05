@@ -773,7 +773,10 @@ func handleMatch(coord *Coord, key *big.Int, h [20]byte, payout, api string, sto
 	fmt.Printf("\n\n*** MATCH *** key=0x%x\n  WIF (import this): %s\n  address: %s\n", key, wif, addr)
 	saveFound(key, wif, addr)
 	if !goStandalone.Load() {
-		coord.post("/api/match", map[string]string{"key": "0x" + key.Text(16), "hash160": hex.EncodeToString(h[:]), "address": addr}, true, nil)
+		// SECURITY: never send the private key to the coordinator. The key stays
+		// on this device (FOUND_KEY.txt + the local auto-sweep below). We post
+		// only a non-secret notice so other devices know the hunt is over.
+		coord.post("/api/match", map[string]string{"hash160": hex.EncodeToString(h[:]), "address": addr}, true, nil)
 	}
 	if payout != "" {
 		fmt.Printf("  auto-sweeping funds to %s ...\n", payout)

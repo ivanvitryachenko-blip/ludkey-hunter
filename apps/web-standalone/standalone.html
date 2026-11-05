@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; child-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'">
+<meta name="referrer" content="no-referrer">
 <meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#0a0c10">
 <meta name="description" content="LudKey Hunter — Bitcoin Puzzle #71 research engine. Runs in your browser on phone or computer.">
@@ -1071,6 +1073,10 @@ function b58check(h160hex){ const h=hexToBytes(h160hex); const payload=new Uint8
   for(let i=0;i<full.length&&full[i]===0;i++) out="1"+out; return out; }
 
 /* ---------------- formatting ---------------- */
+// HTML-escape any dynamic string before putting it into innerHTML. Device
+// names/types come from other devices (via the coordinator or the shared DB)
+// and are attacker-controllable, so they must be escaped to prevent stored XSS.
+function esc(s){ return String(s==null?"":s).replace(/[&<>"'`]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;","`":"&#96;"}[c])); }
 function fmtSpeed(k){ if(k>=1e9)return (k/1e9).toFixed(2)+" Gkey/s"; if(k>=1e6)return (k/1e6).toFixed(2)+" Mkey/s"; if(k>=1e3)return (k/1e3).toFixed(2)+" Kkey/s"; return (k||0).toFixed(0)+" key/s"; }
 function fmtNum(n){ return Math.round(n).toLocaleString(); }
 // Percent as a full decimal (never "e-14"), so even a cosmically small share
@@ -1773,7 +1779,7 @@ function showMatch(key, h160, addr){
     "WIF (import this) = <span class='mono'>"+wif+"</span><br>"+
     "address = <span class='mono'>"+addr+"</span><br>"+
     (payout
-      ? "payout target = <span class='mono'>"+payout+"</span> — import the WIF into a wallet and send the funds there, or use the CLI <span class='mono'>--payout "+payout+"</span> for an automatic signed sweep.<br>"
+      ? "payout target = <span class='mono'>"+esc(payout)+"</span> — import the WIF into a wallet and send the funds there, or use the CLI <span class='mono'>--payout "+esc(payout)+"</span> for an automatic signed sweep.<br>"
       : "") +
     "<span class='hint'>Shown only on this device. Never transmitted. Keep the key private.</span>";
   switchView("dashboard");
@@ -1886,7 +1892,7 @@ function renderFrame(){
     if(serverStatus.summary){ $("d-scanned").textContent = fmtNum(Number(serverStatus.summary.scanned||0)); $("d-progress").textContent = fmtTinyPct(serverStatus.summary.percent||0); }
     // devices table
     const tb=$("dev-rows");
-    tb.innerHTML = serverStatus.devices.map(d=>"<tr><td>"+(d.name||d.id)+(d.id===(connCred&&connCred.id)?" (this)":"")+"</td><td>"+(d.type||"?")+"</td><td>—</td><td>—</td><td><span class='chip "+(d.online?"good":"")+"'>"+(d.online?"online":"offline")+"</span></td><td>"+fmtSpeed(d.speed||0)+"</td><td>"+(d.online?"searching":"idle")+"</td></tr>").join("");
+    tb.innerHTML = serverStatus.devices.map(d=>"<tr><td>"+esc(d.name||d.id)+(d.id===(connCred&&connCred.id)?" (this)":"")+"</td><td>"+esc(d.type||"?")+"</td><td>—</td><td>—</td><td><span class='chip "+(d.online?"good":"")+"'>"+(d.online?"online":"offline")+"</span></td><td>"+fmtSpeed(d.speed||0)+"</td><td>"+(d.online?"searching":"idle")+"</td></tr>").join("");
   }
 
   // Shared mode (Claude db): combine progress + speed across all devices.
@@ -1902,7 +1908,7 @@ function renderFrame(){
     $("d-scanned").textContent = fmtNum(coveredK);
     $("d-progress").textContent = fmtTinyPct(pct);
     const tb=$("dev-rows");
-    tb.innerHTML = (online.length?online:[{id:myDevId,type:deviceType(),speed:0}]).map(d=>"<tr><td>"+(d.name||d.id)+(d.id===myDevId?" (this)":"")+"</td><td>"+(d.type||"?")+"</td><td>—</td><td>—</td><td><span class='chip good'>online</span></td><td>"+fmtSpeed(d.speed||0)+"</td><td>searching</td></tr>").join("");
+    tb.innerHTML = (online.length?online:[{id:myDevId,type:deviceType(),speed:0}]).map(d=>"<tr><td>"+esc(d.name||d.id)+(d.id===myDevId?" (this)":"")+"</td><td>"+esc(d.type||"?")+"</td><td>—</td><td>—</td><td><span class='chip good'>online</span></td><td>"+fmtSpeed(d.speed||0)+"</td><td>searching</td></tr>").join("");
   }
 
   // Segment progress across the WHOLE #72 range (2²⁵ segments). Source depends
@@ -2022,13 +2028,13 @@ function saveSession(reason){ const t=totals(); const arr=loadSessions();
 function persistLive(){ try{ localStorage.setItem("ludkey.live", JSON.stringify({ when:new Date().toISOString(), scanned: totals().scanned })); }catch(e){} }
 function renderHistory(){ const arr=loadSessions().slice().reverse(); const tb=$("hist-rows");
   if(!arr.length){ tb.innerHTML="<tr><td colspan='6' style='color:var(--faint)'>No saved sessions yet.</td></tr>"; return; }
-  tb.innerHTML = arr.map(s=>"<tr><td>"+new Date(s.when).toLocaleString()+"</td><td>"+s.mode+"</td><td>"+s.range+"</td><td>"+fmtNum(s.scanned)+"</td><td>"+fmtSpeed(s.peak)+"</td><td>"+(s.result==="MATCH"?"<span class='chip good'>MATCH</span>":"<span class='chip'>"+s.result+"</span>")+"</td></tr>").join("");
+  tb.innerHTML = arr.map(s=>"<tr><td>"+esc(new Date(s.when).toLocaleString())+"</td><td>"+esc(s.mode)+"</td><td>"+esc(s.range)+"</td><td>"+fmtNum(s.scanned)+"</td><td>"+fmtSpeed(s.peak)+"</td><td>"+(s.result==="MATCH"?"<span class='chip good'>MATCH</span>":"<span class='chip'>"+esc(s.result)+"</span>")+"</td></tr>").join("");
 }
 
 /* ---------------- events log ---------------- */
 const events=[];
 function logEvent(kind,msg){ const t=new Date().toLocaleTimeString(); events.push({t,kind,msg}); if(events.length>60) events.shift(); const el=$("dash-log");
-  el.innerHTML = events.slice().reverse().map(e=>"<div><span class='t'>"+e.t+"</span> <span class='ev-"+(e.kind==='hit'?'hit':e.kind==='warn'?'warn':e.kind==='crit'?'crit':e.kind==='demo'?'hit':'good')+"'>"+e.msg+"</span></div>").join(""); }
+  el.innerHTML = events.slice().reverse().map(e=>"<div><span class='t'>"+esc(e.t)+"</span> <span class='ev-"+(e.kind==='hit'?'hit':e.kind==='warn'?'warn':e.kind==='crit'?'crit':e.kind==='demo'?'hit':'good')+"'>"+esc(e.msg)+"</span></div>").join(""); }
 
 /* ---------------- nav ---------------- */
 const titles={dashboard:"Dashboard",search:"Search",devices:"Devices",gpu:"GPU Monitor",stats:"Statistics",history:"History",settings:"Settings"};

@@ -9,6 +9,7 @@ const suites = [
   ["CPU engine", "packages/engine/test/engine.test.ts"],
   ["range allocator", "packages/server/test/allocator.test.ts"],
   ["server integration", "packages/server/test/server.integration.test.ts"],
+  ["server security", "packages/server/test/security.test.ts"],
   ["claim / tx signing", "packages/claim/test/claim.test.ts"],
   ["webgpu field model", "packages/web-webgpu/model/field.test.mjs"],
   ["webgpu EC model", "packages/web-webgpu/model/ec.test.mjs"],
