@@ -523,6 +523,7 @@ func selfTest() bool {
 
 func main() {
 	server := flag.String("server", "https://ludkey-hunter.8jt6mh8rz9.workers.dev", "coordinator URL")
+	standalone := flag.Bool("standalone", false, "search without a coordinator (random local segments)")
 	threads := flag.Int("threads", runtime.NumCPU(), "worker threads (1 segment each)")
 	window := flag.Int("window", 1024, "batch window size")
 	payout := flag.String("payout", "bc1qqngxt0ckry86kfw36d37g99tfxmlfe5ujpvm2a8lak7cn7u3w0wsqkg95s", "payout address — funds are auto-swept here on a find")
@@ -551,33 +552,49 @@ func main() {
 	}
 	coord := &Coord{base: base, client: &http.Client{Timeout: 20 * time.Second, Transport: tr}}
 
-	// info (target hash160)
+	if *standalone {
+		goStandalone.Store(true)
+	}
+
+	// info (target hash160). If the coordinator is unreachable, fall back to the
+	// built-in #72 target and run standalone — never exit.
 	var info struct {
 		Puzzle  int    `json:"puzzle"`
 		Hash160 string `json:"hash160"`
 		Address string `json:"address"`
 	}
-	if err := coord.getJSON("/api/info", &info); err != nil {
-		fmt.Println("Could not reach coordinator /api/info:", err)
-		os.Exit(1)
-	}
-	targetBytes, _ := hex.DecodeString(info.Hash160)
 	var target [20]byte
-	copy(target[:], targetBytes)
-	fmt.Printf("Coordinator OK — puzzle #%d, target %s (%s)\n", info.Puzzle, info.Hash160, info.Address)
+	if goStandalone.Load() {
+		target = fallbackTarget
+		fmt.Println("Standalone mode — searching #72 with no coordinator.")
+	} else if err := coord.getJSON("/api/info", &info); err != nil {
+		fmt.Println("Coordinator unreachable (" + err.Error() + ") — switching to STANDALONE (random local segments).")
+		goStandalone.Store(true)
+		target = fallbackTarget
+	} else {
+		b, _ := hex.DecodeString(info.Hash160)
+		copy(target[:], b)
+		fmt.Printf("Coordinator OK — puzzle #%d, target %s (%s)\n", info.Puzzle, info.Hash160, info.Address)
+	}
 
-	// register
+	// register (skipped in standalone)
 	var reg struct {
 		DeviceID string `json:"deviceId"`
 		Token    string `json:"token"`
 	}
 	host, _ := os.Hostname()
-	if err := coord.post("/api/register", map[string]string{"name": "native-" + host, "type": "native-cpu"}, false, &reg); err != nil {
-		fmt.Println("Register failed:", err)
-		os.Exit(1)
+	if !goStandalone.Load() {
+		if err := coord.post("/api/register", map[string]string{"name": "native-" + host, "type": "native-cpu"}, false, &reg); err != nil {
+			fmt.Println("Register failed (" + err.Error() + ") — switching to STANDALONE.")
+			goStandalone.Store(true)
+		} else {
+			coord.token = reg.Token
+			fmt.Printf("Registered as %s — starting search on %d cores\n\n", reg.DeviceID, *threads)
+		}
 	}
-	coord.token = reg.Token
-	fmt.Printf("Registered as %s — starting search on %d cores\n\n", reg.DeviceID, *threads)
+	if goStandalone.Load() && reg.DeviceID == "" {
+		reg.DeviceID = "standalone-" + host
+	}
 
 	table := precomputeF(*window)
 	var scanned uint64
@@ -586,7 +603,7 @@ func main() {
 	var wg sync.WaitGroup
 	startTime := time.Now()
 	devShort := reg.DeviceID
-	tShort := info.Hash160
+	tShort := hex.EncodeToString(target[:])
 	if len(tShort) > 12 {
 		tShort = tShort[:8] + "…" + tShort[len(tShort)-4:]
 	}
@@ -615,39 +632,46 @@ func main() {
 			dt := time.Since(lastT).Seconds()
 			spd := float64(cur-last) / dt
 			last, lastT = cur, time.Now()
-			coord.post("/api/heartbeat", map[string]any{"speed": int(spd), "scanned": fmt.Sprintf("%d", cur)}, true, nil)
-			var gs struct {
-				Summary struct {
-					ChunkCount string  `json:"chunkCount"`
-					Done       int     `json:"done"`
-					Assigned   int     `json:"assigned"`
-					Percent    float64 `json:"percent"`
-				} `json:"summary"`
-				TotalSpeed float64 `json:"totalSpeed"`
-				Devices    []struct {
-					Online bool `json:"online"`
-				} `json:"devices"`
-			}
-			coord.getJSON("/api/status", &gs)
-			online := 0
-			for _, d := range gs.Devices {
-				if d.Online {
-					online++
-				}
-			}
 			segHere := atomic.LoadUint64(&segmentsDone)
 			up := time.Since(startTime).Truncate(time.Second)
-			render([]string{
+			lines := []string{
 				"╭─ LudKey Hunter · native agent ──────────────────────────────╮",
 				"  puzzle   #72   ·   target " + tShort,
 				fmt.Sprintf("  device   %s   ·   %d workers   ·   up %s", devShort, *threads, up),
 				fmt.Sprintf("  speed    %-14s (this PC)", speed(spd)),
 				fmt.Sprintf("  scanned  %-10s keys  ·  %s segments done here", human(cur), commas(segHere)),
-				fmt.Sprintf("  shared   %s segments done  ·  %d device(s) online", commas(uint64(gs.Summary.Done)), online),
-				fmt.Sprintf("  shared   %s in progress  ·  shared speed %s", commas(uint64(gs.Summary.Assigned)), speed(gs.TotalSpeed)),
-				fmt.Sprintf("  shared   %s of the #72 space searched", pctStr(gs.Summary.Percent)),
-				"╰──────────────────────────────────────────────────────────────╯",
-			})
+			}
+			if goStandalone.Load() {
+				lines = append(lines,
+					"  mode     STANDALONE — no coordinator (random local segments)",
+					"  note     running at full speed; shared progress is off")
+			} else {
+				coord.post("/api/heartbeat", map[string]any{"speed": int(spd), "scanned": fmt.Sprintf("%d", cur)}, true, nil)
+				var gs struct {
+					Summary struct {
+						Done     int     `json:"done"`
+						Assigned int     `json:"assigned"`
+						Percent  float64 `json:"percent"`
+					} `json:"summary"`
+					TotalSpeed float64 `json:"totalSpeed"`
+					Devices    []struct {
+						Online bool `json:"online"`
+					} `json:"devices"`
+				}
+				coord.getJSON("/api/status", &gs)
+				online := 0
+				for _, d := range gs.Devices {
+					if d.Online {
+						online++
+					}
+				}
+				lines = append(lines,
+					fmt.Sprintf("  shared   %s segments done  ·  %d device(s) online", commas(uint64(gs.Summary.Done)), online),
+					fmt.Sprintf("  shared   %s in progress  ·  shared speed %s", commas(uint64(gs.Summary.Assigned)), speed(gs.TotalSpeed)),
+					fmt.Sprintf("  shared   %s of the #72 space searched", pctStr(gs.Summary.Percent)))
+			}
+			lines = append(lines, "╰──────────────────────────────────────────────────────────────╯")
+			render(lines)
 		}
 	}()
 
@@ -658,58 +682,56 @@ func main() {
 			st := &scanState{target: target, table: table, window: *window, scanned: &scanned, stop: &stop,
 				dxs: make([]fe, *window), pre: make([]fe, *window), invs: make([]fe, *window)}
 			for !stop.Load() {
-				var lease struct {
-					Chunk *struct {
-						Index string `json:"index"`
-						Start string `json:"start"`
-						End   string `json:"end"`
-					} `json:"chunk"`
-				}
-				if err := coord.post("/api/lease", map[string]any{}, true, &lease); err != nil {
-					fmt.Printf("\n[worker %d] coordinator unreachable: %v\n", id, err)
-					time.Sleep(3 * time.Second)
-					continue
-				}
-				if lease.Chunk == nil {
-					fmt.Printf("\n[worker %d] no more work from coordinator\n", id)
-					return
-				}
-				start := hexToBig(lease.Chunk.Start)
-				end := hexToBig(lease.Chunk.End)
-				// renew this segment's lease periodically
-				stopRenew := make(chan struct{})
-				go func(idx string) {
-					for {
-						select {
-						case <-stopRenew:
-							return
-						case <-time.After(60 * time.Second):
-							coord.post("/api/heartbeat", map[string]any{"chunkIndex": idx}, true, nil)
-						}
+				var start, end *big.Int
+				var chunkIdx string
+				var stopRenew chan struct{}
+				if goStandalone.Load() {
+					start, end = randSegment() // no coordinator: random local segment
+				} else {
+					var lease struct {
+						Chunk *struct {
+							Index string `json:"index"`
+							Start string `json:"start"`
+							End   string `json:"end"`
+						} `json:"chunk"`
 					}
-				}(lease.Chunk.Index)
+					if err := coord.post("/api/lease", map[string]any{}, true, &lease); err != nil {
+						if goStandalone.CompareAndSwap(false, true) {
+							fmt.Printf("\n[worker %d] coordinator unreachable (%v) — switching to STANDALONE (random local segments).\n", id, err)
+						}
+						continue
+					}
+					if lease.Chunk == nil {
+						time.Sleep(2 * time.Second) // no free segment right now; wait, don't quit
+						continue
+					}
+					start = hexToBig(lease.Chunk.Start)
+					end = hexToBig(lease.Chunk.End)
+					chunkIdx = lease.Chunk.Index
+					stopRenew = make(chan struct{})
+					go func(idx string, done chan struct{}) {
+						for {
+							select {
+							case <-done:
+								return
+							case <-time.After(60 * time.Second):
+								coord.post("/api/heartbeat", map[string]any{"chunkIndex": idx}, true, nil)
+							}
+						}
+					}(chunkIdx, stopRenew)
+				}
 
 				key, h, found := scanSegment(start, end, st)
-				close(stopRenew)
+				if stopRenew != nil {
+					close(stopRenew)
+				}
 				if found {
-					addr := addrFromH160(h)
-					wif := wifCompressed(key)
-					fmt.Printf("\n\n*** MATCH *** key=0x%x\n  WIF (import this): %s\n  address: %s\n", key, wif, addr)
-					coord.post("/api/match", map[string]string{"key": "0x" + key.Text(16), "hash160": hex.EncodeToString(h[:]), "address": addr}, true, nil)
-					saveFound(key, wif, addr)
-					if *payout != "" {
-						fmt.Printf("  auto-sweeping funds to %s ...\n", *payout)
-						txid, serr := autoSweep(key, *payout, *api)
-						if serr != nil {
-							fmt.Printf("  SWEEP ERROR: %v\n  (your key is safe in FOUND_KEY.txt — import the WIF and move funds yourself)\n", serr)
-						} else {
-							fmt.Printf("  *** SWEEP BROADCAST *** txid: %s\n  track: https://mempool.space/tx/%s\n", txid, txid)
-						}
-					}
-					stop.Store(true)
+					handleMatch(coord, key, h, *payout, *api, &stop)
 					return
 				}
-				coord.post("/api/complete", map[string]any{"chunkIndex": lease.Chunk.Index}, true, nil)
+				if chunkIdx != "" && !goStandalone.Load() {
+					coord.post("/api/complete", map[string]any{"chunkIndex": chunkIdx}, true, nil)
+				}
 				atomic.AddUint64(&segmentsDone, 1)
 			}
 		}(t)
@@ -718,6 +740,26 @@ func main() {
 	wg.Wait()
 	stop.Store(true)
 	fmt.Println("\nStopped.")
+}
+
+func handleMatch(coord *Coord, key *big.Int, h [20]byte, payout, api string, stop *atomic.Bool) {
+	addr := addrFromH160(h)
+	wif := wifCompressed(key)
+	fmt.Printf("\n\n*** MATCH *** key=0x%x\n  WIF (import this): %s\n  address: %s\n", key, wif, addr)
+	saveFound(key, wif, addr)
+	if !goStandalone.Load() {
+		coord.post("/api/match", map[string]string{"key": "0x" + key.Text(16), "hash160": hex.EncodeToString(h[:]), "address": addr}, true, nil)
+	}
+	if payout != "" {
+		fmt.Printf("  auto-sweeping funds to %s ...\n", payout)
+		txid, serr := autoSweep(key, payout, api)
+		if serr != nil {
+			fmt.Printf("  SWEEP ERROR: %v\n  (your key is safe in FOUND_KEY.txt — import the WIF and move funds yourself)\n", serr)
+		} else {
+			fmt.Printf("  *** SWEEP BROADCAST *** txid: %s\n  track: https://mempool.space/tx/%s\n", txid, txid)
+		}
+	}
+	stop.Store(true)
 }
 
 func hexToBig(s string) *big.Int {
