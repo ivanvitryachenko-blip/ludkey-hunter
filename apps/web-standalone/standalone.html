@@ -478,7 +478,7 @@
           <div class="controls" style="margin:8px 0; flex-wrap:wrap; align-items:center; gap:10px;">
             <button class="btn" id="bench-quick" type="button">▶ Quick (6s each)</button>
             <button class="btn ghost" id="bench-long" type="button">▶ Full (60s each)</button>
-            <label class="field" style="margin:0;">GPU window W<select id="bench-w"><option value="8">8</option><option value="16" selected>16</option><option value="32">32</option><option value="64">64</option></select></label>
+            <label class="field" style="margin:0;">GPU window W<select id="bench-w"><option value="8">8</option><option value="16">16</option><option value="32">32</option><option value="64" selected>64</option><option value="96">96</option><option value="128">128</option><option value="192">192</option><option value="256">256</option></select></label>
             <span class="hint" id="bench-status"></span>
           </div>
           <p class="hint">Try several W values and keep the fastest on your device — larger W means one field inversion amortised over more keys, but more GPU memory per thread. The best W is device-specific (that's why it's measured, not fixed).</p>
@@ -1518,7 +1518,9 @@ function startRandomLocal(){
 let gpuReason = "";
 async function ensureGpu(){
   if(!window.WebGPUSearch){ gpuReason="window.WebGPUSearch missing"; return false; }
-  if(!gpuEngine) gpuEngine = new window.WebGPUSearch();
+  // Use the window size the user tuned on this device (default 64 — measured as
+  // the fast point on modern mobile GPUs; bigger W amortises the inversion more).
+  if(!gpuEngine || gpuEngine.W!==gpuW()) gpuEngine = new window.WebGPUSearch(gpuW());
   if(gpuEngine.ok) return true;
   logEvent("info","Initializing WebGPU and running the on-device self-test…");
   gpuReason = ("gpu" in navigator) ? "" : "navigator.gpu missing (WebGPU off in this browser)";
@@ -2296,6 +2298,8 @@ function wireTools(){
   toolsTime(); toolsProgress(); toolsRange(); toolsSegTable(); toolsDevTable();
 }
 // ---- Benchmark: measured CPU vs GPU throughput on this device (no fake numbers) ----
+// The GPU window size the real search uses, tuned per-device via the benchmark.
+function gpuW(){ try{ const v=parseInt(localStorage.getItem("ludkey.gpuW")); if(v>=1&&v<=256) return v; }catch(_){} return 64; }
 let benchBusy=false;
 async function runGpuBench(seconds){
   const g=gpuEngine; const target=hexToBytes(PUZZLE.h160); // real target: never matches in a short run
@@ -2329,7 +2333,8 @@ async function runBench(seconds){
   try{
     stx.textContent="Checking WebGPU…";
     // Re-create the engine for the chosen window size so the benchmark tunes W.
-    const wSel=Math.max(1, parseInt(($("bench-w")&&$("bench-w").value)||"16")||16);
+    const wSel=Math.max(1, parseInt(($("bench-w")&&$("bench-w").value)||"64")||64);
+    try{ localStorage.setItem("ludkey.gpuW", String(wSel)); }catch(_){} // the real GPU search uses this W too
     if(window.WebGPUSearch && (!gpuEngine || gpuEngine.W!==wSel)) gpuEngine = new window.WebGPUSearch(wSel);
     const gok=await ensureGpu();
     const rows=[];
@@ -2532,7 +2537,7 @@ $("coveredText").textContent = "Covered: "+doneChunks.size.toLocaleString()+" se
 renderHistory(); detectGPU(); runSelfTest(); updateFeasNote(0);
 $("mode").dispatchEvent(new Event("change")); // reflect default (collaborative) mode in the UI
 try{ wireTools(); }catch(_){}
-try{ $("bench-quick").addEventListener("click", ()=>runBench(6)); $("bench-long").addEventListener("click", ()=>runBench(60)); }catch(_){}
+try{ $("bench-quick").addEventListener("click", ()=>runBench(6)); $("bench-long").addEventListener("click", ()=>runBench(60)); if($("bench-w")) $("bench-w").value=String(gpuW()); }catch(_){}
 const startHash=location.hash.slice(1); if(titles[startHash]) switchView(startHash);
 requestAnimationFrame(render);
 logEvent("info","LudKey Hunter ready — CPU engine, "+(navigator.hardwareConcurrency||"?")+" threads available");
