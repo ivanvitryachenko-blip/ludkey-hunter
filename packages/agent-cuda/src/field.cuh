@@ -372,13 +372,29 @@ __device__ __constant__ uint32_t SECP_P_MINUS_2[8] = {
   0xFFFFFC2D, 0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFF,
   0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
 };
+__device__ __forceinline__ void fe_cp(uint32_t* d, const uint32_t* s) { for (int i = 0; i < 8; ++i) d[i] = s[i]; }
+
+// Modular inverse via Fermat with the secp256k1 addition chain (libsecp256k1
+// layout): ~255 squarings + 15 multiplications, versus the naive binary
+// exponentiation's ~255 squarings + ~249 multiplications. mod_sqr/mod_mul are
+// safe in place (operands are read into a local product before the result is
+// written), so every step squares/multiplies its own buffer. Verified on host
+// bit-for-bit against the binary-exponentiation reference.
 __device__ void mod_inv(uint32_t* r, const uint32_t* a) {
-  uint32_t result[8] = {1,0,0,0,0,0,0,0};
-  uint32_t base[8]; for (int i = 0; i < 8; ++i) base[i] = a[i];
-  for (int bit = 0; bit < 256; ++bit) {
-    uint32_t limb = SECP_P_MINUS_2[bit >> 5];
-    if ((limb >> (bit & 31)) & 1u) { uint32_t t[8]; mod_mul(t, result, base); for (int i=0;i<8;++i) result[i]=t[i]; }
-    uint32_t s[8]; mod_sqr(s, base); for (int i=0;i<8;++i) base[i]=s[i];
-  }
-  for (int i = 0; i < 8; ++i) r[i] = result[i];
+  uint32_t x2[8],x3[8],x6[8],x9[8],x11[8],x22[8],x44[8],x88[8],x176[8],x220[8],x223[8],t1[8];
+  mod_sqr(x2, a);    mod_mul(x2, x2, a);                              // a^(2^2-1)
+  mod_sqr(x3, x2);   mod_mul(x3, x3, a);                              // a^(2^3-1)
+  fe_cp(x6, x3);     for (int j=0;j<3;++j) mod_sqr(x6,x6);   mod_mul(x6,x6,x3);     // 2^6-1
+  fe_cp(x9, x6);     for (int j=0;j<3;++j) mod_sqr(x9,x9);   mod_mul(x9,x9,x3);     // 2^9-1
+  fe_cp(x11, x9);    for (int j=0;j<2;++j) mod_sqr(x11,x11); mod_mul(x11,x11,x2);   // 2^11-1
+  fe_cp(x22, x11);   for (int j=0;j<11;++j) mod_sqr(x22,x22); mod_mul(x22,x22,x11); // 2^22-1
+  fe_cp(x44, x22);   for (int j=0;j<22;++j) mod_sqr(x44,x44); mod_mul(x44,x44,x22); // 2^44-1
+  fe_cp(x88, x44);   for (int j=0;j<44;++j) mod_sqr(x88,x88); mod_mul(x88,x88,x44); // 2^88-1
+  fe_cp(x176, x88);  for (int j=0;j<88;++j) mod_sqr(x176,x176); mod_mul(x176,x176,x88); // 2^176-1
+  fe_cp(x220, x176); for (int j=0;j<44;++j) mod_sqr(x220,x220); mod_mul(x220,x220,x44); // 2^220-1
+  fe_cp(x223, x220); for (int j=0;j<3;++j) mod_sqr(x223,x223); mod_mul(x223,x223,x3);   // 2^223-1
+  fe_cp(t1, x223);   for (int j=0;j<23;++j) mod_sqr(t1,t1);  mod_mul(t1,t1,x22);
+                     for (int j=0;j<5;++j)  mod_sqr(t1,t1);  mod_mul(t1,t1,a);
+                     for (int j=0;j<3;++j)  mod_sqr(t1,t1);  mod_mul(t1,t1,x2);
+                     for (int j=0;j<2;++j)  mod_sqr(t1,t1);  mod_mul(r,t1,a);
 }
