@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"runtime"
@@ -537,7 +538,18 @@ func main() {
 	fmt.Println("Self-test PASSED (matches the puzzle test vectors).")
 
 	base := strings.TrimRight(*server, "/")
-	coord := &Coord{base: base, client: &http.Client{Timeout: 30 * time.Second}}
+	// Fresh connection per request (DisableKeepAlives): some VPNs/proxies drop
+	// idle keep-alive sockets, which shows up as "register worked, then lease
+	// times out". A new connection each time + a shorter timeout + retries make
+	// the agent robust on flaky networks.
+	tr := &http.Transport{
+		DisableKeepAlives:     true,
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 15 * time.Second,
+		ForceAttemptHTTP2:     false,
+	}
+	coord := &Coord{base: base, client: &http.Client{Timeout: 20 * time.Second, Transport: tr}}
 
 	// info (target hash160)
 	var info struct {
