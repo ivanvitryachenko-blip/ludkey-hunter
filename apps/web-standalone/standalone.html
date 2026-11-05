@@ -479,6 +479,7 @@
             <button class="btn" id="bench-quick" type="button">▶ Quick (6s each)</button>
             <button class="btn ghost" id="bench-long" type="button">▶ Full (60s each)</button>
             <button class="btn" id="bench-auto" type="button">⚙ Auto-tune W</button>
+            <button class="btn ghost" id="bench-stab" type="button">⏱ Stability (5 min)</button>
             <label class="field" style="margin:0;">GPU window W<select id="bench-w"><option value="8">8</option><option value="16">16</option><option value="32">32</option><option value="64">64</option><option value="96" selected>96</option><option value="128">128</option><option value="192">192</option><option value="256">256</option></select></label>
             <label class="field" style="margin:0;">Workgroup<select id="bench-wg"><option value="32">32</option><option value="64" selected>64</option><option value="128">128</option><option value="256">256</option></select></label>
             <span class="hint" id="bench-status"></span>
@@ -2310,20 +2311,22 @@ function wireTools(){
 function gpuW(){ try{ const v=parseInt(localStorage.getItem("ludkey.gpuW")); if(v>=1&&v<=256) return v; }catch(_){} return 96; }
 function gpuWG(){ try{ const v=parseInt(localStorage.getItem("ludkey.gpuWG")); if(v===32||v===64||v===128||v===256) return v; }catch(_){} return 64; }
 let benchBusy=false;
-async function runGpuBench(seconds){
+function median(a){ if(!a.length) return 0; const s=a.slice().sort((x,y)=>x-y); const m=s.length>>1; return s.length%2?s[m]:(s[m-1]+s[m])/2; }
+async function runGpuBench(seconds, onSample){
   const g=gpuEngine; const target=hexToBytes(PUZZLE.h160); // real target: never matches in a short run
-  let base=PUZZLE.start+1234567n, scanned=0, peak=0, BATCH=8192;
+  let base=PUZZLE.start+1234567n, scanned=0, peak=0, BATCH=8192; const samples=[];
   const t0=performance.now();
   while((performance.now()-t0)/1000 < seconds){
     const d0=performance.now();
     let res; try{ res=await g.searchBatch(base, target, BATCH); }catch(e){ return {err:e.message}; }
     const dt=(performance.now()-d0)/1000; scanned+=BATCH; base+=BigInt(BATCH);
-    const kps= dt>0?BATCH/dt:0; if(kps>peak) peak=kps;
+    const kps= dt>0?BATCH/dt:0; if(kps>peak) peak=kps; samples.push(kps);
+    if(onSample) onSample((performance.now()-t0)/1000, kps);
     if(dt<0.15) BATCH=Math.min(1<<20,BATCH*2); else if(dt>0.5) BATCH=Math.max(256,(BATCH/2)|0);
     if(res && res.found) break; // astronomically unlikely, but stop honestly
     await sleep(0);
   }
-  return { kps: scanned/((performance.now()-t0)/1000), peak, scanned };
+  return { kps: scanned/((performance.now()-t0)/1000), median: median(samples), peak, scanned, samples };
 }
 function runCpuBench(seconds){
   return new Promise(resolve=>{
@@ -2363,7 +2366,7 @@ async function runBench(seconds){
     if(gok){ stx.textContent="Measuring GPU…"; gpu=await runGpuBench(seconds); }
     rows.push(["CPU (Web Worker, 1 core)", fmtSpeed(cpu.kps)]);
     if(gpu.err) rows.push(["GPU", "error: "+gpu.err]);
-    else{ rows.push(["GPU (WebGPU, windowed)", fmtSpeed(gpu.kps)+"  ·  peak "+fmtSpeed(gpu.peak)]); rows.push(["GPU / CPU ratio", cpu.kps>0?((gpu.kps/cpu.kps).toFixed(2)+"×"):"—"]); }
+    else{ rows.push(["GPU (WebGPU, windowed)", "median "+fmtSpeed(gpu.median)+"  ·  avg "+fmtSpeed(gpu.kps)+"  ·  peak "+fmtSpeed(gpu.peak)]); rows.push(["GPU kernel time (last)", gpuEngine&&gpuEngine.lastDispatchMs?Math.round(gpuEngine.lastDispatchMs)+" ms/dispatch":"—"]); rows.push(["GPU / CPU ratio (median)", cpu.kps>0?(((gpu.median||gpu.kps)/cpu.kps).toFixed(2)+"×"):"—"]); }
     kvRows(out, rows);
     stx.textContent="Done. (measured on this device)";
   }catch(e){ stx.textContent="Benchmark error: "+(e&&e.message||e); }
@@ -2378,9 +2381,9 @@ async function measureConfig(W, WG, seconds, rows, out){
   let eng; try{ eng=new window.WebGPUSearch(W, WG); const st=await eng.init(); if(!st.ok){ rows.push(["W="+W+" · WG="+WG, "rejected ("+((st.reason||"").slice(0,36))+")"]); kvRows(out,rows); return {kps:0}; } }
   catch(e){ rows.push(["W="+W+" · WG="+WG, "rejected ("+((e.message||"").slice(0,36))+")"]); kvRows(out,rows); return {kps:0}; }
   const saveEng=gpuEngine; gpuEngine=eng; const r=await runGpuBench(seconds); gpuEngine=saveEng;
-  const kps=r.err?0:r.kps;
-  rows.push(["W="+W+" · WG="+WG, r.err?("error: "+r.err):(fmtSpeed(kps)+"  · peak "+fmtSpeed(r.peak))]);
-  kvRows(out,rows); return {kps, peak:r.peak};
+  const kps=r.err?0:r.median; // rank by the stable MEDIAN, not a one-off peak
+  rows.push(["W="+W+" · WG="+WG, r.err?("error: "+r.err):("median "+fmtSpeed(r.median)+"  · avg "+fmtSpeed(r.kps)+"  · peak "+fmtSpeed(r.peak))]);
+  kvRows(out,rows); return {kps, median:r.median, peak:r.peak};
 }
 async function autoTuneW(seconds){
   if(benchBusy) return;
@@ -2408,10 +2411,41 @@ async function autoTuneW(seconds){
     gpuEngine = new window.WebGPUSearch(bestW, bestWG); await ensureGpu();
     if($("bench-w")) $("bench-w").value=String(bestW);
     if($("bench-wg")) $("bench-wg").value=String(bestWG);
-    rows.push(["Best config", "W="+bestW+" · WG="+bestWG+"  ·  "+fmtSpeed(bestKps)+"  (saved — the real GPU search uses it)"]);
+    rows.push(["Best config (by median)", "W="+bestW+" · WG="+bestWG+"  ·  median "+fmtSpeed(bestKps)+"  (saved — the real GPU search uses it)"]);
     kvRows(out,rows); stx.textContent="Done — W="+bestW+", WG="+bestWG+" saved.";
-    logEvent("good","GPU auto-tune: W="+bestW+", WG="+bestWG+" ("+fmtSpeed(bestKps)+")");
+    logEvent("good","GPU auto-tune: W="+bestW+", WG="+bestWG+" (median "+fmtSpeed(bestKps)+")");
   }catch(e){ stx.textContent="Auto-tune error: "+(e&&e.message||e); }
+  finally{ benchBusy=false; }
+}
+
+// Stage 8/9: sustained-speed stability run — measures throughput at 1/3/5 min
+// and the decline from the 1-min mark (thermal/throttle), without any fake
+// temperature sensor. Uses the per-dispatch samples; the adaptive sizer already
+// backs the dispatch off if the GPU slows.
+async function runStability(){
+  if(benchBusy) return;
+  if(running){ $("bench-status").textContent="Stop the search first."; return; }
+  benchBusy=true; const out=$("bench-out"), stx=$("bench-status"); const rows=[];
+  try{
+    const gok=await ensureGpu();
+    if(!gok){ stx.textContent="GPU unavailable: "+(gpuReason||""); kvRows(out,[["GPU","unavailable"]]); return; }
+    rows.push(["Config", "W="+gpuEngine.W+" · workgroup="+gpuEngine.WG]); kvRows(out,rows);
+    const marks={60:null,180:null,300:null}; const win=[];
+    const r=await runGpuBench(300, (el,kps)=>{
+      win.push(kps); if(win.length>60) win.shift();
+      for(const m of [60,180,300]){ if(marks[m]===null && el>=m) marks[m]=median(win); }
+      if((el|0)%5===0) stx.textContent="Stability "+(el|0)+"s · "+fmtSpeed(kps);
+    });
+    if(r.err){ stx.textContent="GPU error: "+r.err; return; }
+    const s1=marks[60]||r.median, s3=marks[180]||s1, s5=marks[300]||r.median;
+    rows.push(["Speed @ 1 min", fmtSpeed(s1)]);
+    rows.push(["Speed @ 3 min", fmtSpeed(s3)]);
+    rows.push(["Speed @ 5 min", fmtSpeed(s5)]);
+    const decline=s1>0?(1-s5/s1)*100:0;
+    rows.push(["Sustained vs 1-min", decline>0.5?("−"+decline.toFixed(1)+"% (throttling)"):"stable"]);
+    kvRows(out,rows); stx.textContent="Stability done ("+fmtSpeed(r.median)+" median).";
+    logEvent("info","GPU stability 5min: 1m "+fmtSpeed(s1)+" → 5m "+fmtSpeed(s5)+(decline>0.5?(" (−"+decline.toFixed(1)+"%)"):" (stable)"));
+  }catch(e){ stx.textContent="Stability error: "+(e&&e.message||e); }
   finally{ benchBusy=false; }
 }
 
@@ -2595,7 +2629,7 @@ $("coveredText").textContent = "Covered: "+doneChunks.size.toLocaleString()+" se
 renderHistory(); detectGPU(); runSelfTest(); updateFeasNote(0);
 $("mode").dispatchEvent(new Event("change")); // reflect default (collaborative) mode in the UI
 try{ wireTools(); }catch(_){}
-try{ $("bench-quick").addEventListener("click", ()=>runBench(6)); $("bench-long").addEventListener("click", ()=>runBench(60)); $("bench-auto").addEventListener("click", ()=>autoTuneW(4)); if($("bench-w")) $("bench-w").value=String(gpuW()); if($("bench-wg")) $("bench-wg").value=String(gpuWG()); }catch(_){}
+try{ $("bench-quick").addEventListener("click", ()=>runBench(6)); $("bench-long").addEventListener("click", ()=>runBench(60)); $("bench-auto").addEventListener("click", ()=>autoTuneW(4)); $("bench-stab").addEventListener("click", runStability); if($("bench-w")) $("bench-w").value=String(gpuW()); if($("bench-wg")) $("bench-wg").value=String(gpuWG()); }catch(_){}
 const startHash=location.hash.slice(1); if(titles[startHash]) switchView(startHash);
 requestAnimationFrame(render);
 logEvent("info","LudKey Hunter ready — CPU engine, "+(navigator.hardwareConcurrency||"?")+" threads available");
