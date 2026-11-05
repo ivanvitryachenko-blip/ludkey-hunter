@@ -1,6 +1,6 @@
 # LudKey Hunter — CUDA agent (NVIDIA)
 
-GPU search backend for Puzzle #71. **This source was not compiled or run in the
+GPU search backend for Puzzle #72. **This source was not compiled or run in the
 environment where it was written (no NVIDIA GPU / CUDA toolkit there).** It is a
 correct-by-design reference that mirrors the CPU engine proven in
 `packages/core` and `packages/engine`, and it **validates itself on your GPU
@@ -17,9 +17,29 @@ Requires an NVIDIA GPU and the CUDA toolkit (`nvcc`). Set `SM` to your card:
 | RTX 5070 / 5090 | 120 | Blackwell — needs CUDA 12.8+ |
 
 ```bash
-make SM=75
-make validate     # runs the GPU-vs-CPU self-test only
+make SM=75              # GTX 1650. Add WIN=96 etc. to set the window size.
+make validate          # runs the GPU-vs-CPU self-test only (incl. the windowed kernel)
+./ludkey_cuda --bench  # measure throughput on your GPU
 ```
+
+## Kernel: windowed batch inversion
+
+Each thread computes its base point once, then derives `WIN-1` consecutive keys
+by affine point addition with a **single** modular inversion per window (the same
+amortised scheme proven in `packages/web-webgpu/model/kernel.mjs`, which is
+checked against per-key scalar multiplication across the #72 range). This removes
+the per-key scalar multiplication and per-key field inversion.
+
+Tune `WIN` per GPU and compare the measured Mkey/s:
+
+```bash
+make clean && make SM=75 WIN=32 && ./ludkey_cuda --bench
+make clean && make SM=75 WIN=64 && ./ludkey_cuda --bench
+make clean && make SM=75 WIN=96 && ./ludkey_cuda --bench
+```
+
+Larger `WIN` amortises the base point and the inversion over more keys, but uses
+more per-thread memory. If a launch prints a kernel error, lower `WIN`.
 
 ## The self-test gate (why you can trust it)
 

@@ -2,8 +2,11 @@
 # Set SM to your card's compute capability:
 #   GTX 1650 = 75,  RTX 3070 = 86,  RTX 5070/5090 (Blackwell) = 120 (use CUDA 12.8+)
 SM ?= 75
+WIN ?= 64
 NVCC ?= nvcc
-NVCCFLAGS = -O3 -arch=sm_$(SM) -lineinfo
+# WIN = keys per thread (window). Larger amortises the base point + inversion
+# over more keys; if a launch errors (too much per-thread memory), lower it.
+NVCCFLAGS = -O3 -arch=sm_$(SM) -lineinfo -DWIN=$(WIN)
 
 all: ludkey_cuda
 
