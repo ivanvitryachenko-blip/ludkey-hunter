@@ -788,7 +788,7 @@ self.onmessage = (e)=>{
 // Correctness on a given GPU is still gated by an on-device self-test (hash160
 // of known keys vs known values); if it fails, callers fall back to CPU.
 
-const SEARCH_WGSL = /* wgsl */ `
+const FIELD_EC_WGSL = /* wgsl */ `
 var<private> P: array<u32,16>   = array<u32,16>(0xfc2fu,0xffffu,0xfffeu,0xffffu,0xffffu,0xffffu,0xffffu,0xffffu,0xffffu,0xffffu,0xffffu,0xffffu,0xffffu,0xffffu,0xffffu,0xffffu);
 var<private> PM2: array<u32,16> = array<u32,16>(0xfc2du,0xffffu,0xfffeu,0xffffu,0xffffu,0xffffu,0xffffu,0xffffu,0xffffu,0xffffu,0xffffu,0xffffu,0xffffu,0xffffu,0xffffu,0xffffu);
 
@@ -906,9 +906,12 @@ fn scalarMulG(key: array<u32,16>) -> array<u32,32> {
   for (var i=0;i<16;i=i+1){ out[i] = x[i]; out[16+i] = y[i]; }
   return out;
 }
-` + SHA256_RIPEMD_WGSL();
+`;
+// Assemble the full search shader for a given window size W (keys per thread).
+// W is baked in at compile time so the per-thread prefix array is fixed-size.
+function buildSearchWGSL(W) { return FIELD_EC_WGSL + SHA256_RIPEMD_WGSL(W); }
 
-function SHA256_RIPEMD_WGSL() { return /* wgsl */ `
+function SHA256_RIPEMD_WGSL(W) { const WM1 = (W|0) - 1; return /* wgsl */ `
 // ---- SHA-256 (one block, msg<=55 bytes) over a byte array in a 64-u32 buffer ----
 var<private> SK: array<u32,64> = array<u32,64>(
 0x428a2f98u,0x71374491u,0xb5c0fbcfu,0xe9b5dba5u,0x3956c25bu,0x59f111f1u,0x923f82a4u,0xab1c5ed5u,
@@ -996,47 +999,77 @@ fn ripemd160(H: array<u32,8>) -> array<u32,5> {
   return R;
 }
 
-@group(0) @binding(0) var<storage, read> params: array<u32>;      // [baseKey 16][target 5 (le words)][count_lo]
-@group(0) @binding(1) var<storage, read_write> result: array<atomic<u32>>; // [found_flag, found_lo, found_hi]
+@group(0) @binding(0) var<storage, read> params: array<u32>;      // [baseKey 16][target 5 (le words)][count]
+@group(0) @binding(1) var<storage, read_write> result: array<atomic<u32>>; // [found_flag, found_keyindex, _]
 @group(0) @binding(2) var<storage, read> gtable: array<u32>;      // precomputed 2^i*G affine: 16 x-limbs + 16 y-limbs per i
+@group(0) @binding(3) var<storage, read> deltas: array<u32>;      // W-1 affine points iG (i=1..W-1): 16 x + 16 y each
 
+const WIN: u32 = ${W}u;       // keys per thread (window)
+
+// hash160(compressed pubkey(x,y)) and compare to the target; record a match.
+fn checkPoint(x: array<u32,16>, y: array<u32,16>, keyIdx: u32) {
+  var pk: array<u32,64>;
+  for (var i=0;i<64;i=i+1){ pk[i] = 0u; }
+  pk[0] = select(0x02u, 0x03u, (y[0] & 1u) == 1u);
+  for (var i=0;i<16;i=i+1){ let limb = x[15 - i]; pk[1 + i*2] = (limb >> 8u) & 0xffu; pk[1 + i*2 + 1] = limb & 0xffu; }
+  let sh = sha256_33(pk);
+  let h = ripemd160(sh);
+  var matched = true;
+  for (var i=0;i<5;i=i+1){ if (h[i] != params[16 + i]) { matched = false; } }
+  if (matched) { atomicStore(&result[0], 1u); atomicStore(&result[1], keyIdx); }
+}
+
+// Windowed batch-inversion kernel: each thread computes its base point ONCE,
+// then derives WIN-1 consecutive points by affine addition of the precomputed
+// iG deltas, using a SINGLE Montgomery batch inversion for the whole window.
+// This removes the per-key scalar mul and per-key inversion of the old kernel.
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let tid = gid.x;
   let count = params[21];
-  if (tid >= count) { return; }
-  // key = base + tid
+  let firstKey = tid * WIN;              // this thread's first key index
+  if (firstKey >= count) { return; }
+  // baseKey = params base + firstKey
   var key: array<u32,16>;
   for (var i=0;i<16;i=i+1){ key[i] = params[i]; }
-  var add = tid; var idx = 0;
-  loop {
-    if (add == 0u || idx >= 16) { break; }
-    let s = key[idx] + (add & 0xffffu);
-    key[idx] = s & 0xffffu;
-    add = (add >> 16u) + (s >> 16u);
-    idx = idx + 1;
+  var add = firstKey; var idx = 0;
+  loop { if (add == 0u || idx >= 16) { break; } let s = key[idx] + (add & 0xffffu); key[idx] = s & 0xffffu; add = (add >> 16u) + (s >> 16u); idx = idx + 1; }
+  let bxy = scalarMulG(key);
+  var bx: array<u32,16>; var by: array<u32,16>;
+  for (var i=0;i<16;i=i+1){ bx[i] = bxy[i]; by[i] = bxy[16+i]; }
+  // window key 0 is the base point itself
+  checkPoint(bx, by, firstKey);
+  ${WM1 > 0 ? `
+  // how many deltas are in range (clip the last window to the batch end)
+  var used: u32 = 0u;
+  for (var i=0u; i<${WM1}u; i=i+1u){ if (firstKey + 1u + i < count) { used = used + 1u; } else { break; } }
+  if (used == 0u) { return; }
+  // forward pass: prefix products of dx_i = deltas[i].x - bx
+  var prefix: array<array<u32,16>, ${WM1}>;
+  var accf: array<u32,16>; accf[0]=1u; for (var i=1;i<16;i=i+1){ accf[i]=0u; }
+  for (var i=0u; i<used; i=i+1u){
+    var dx: array<u32,16>; let o = i*32u;
+    for (var j=0u;j<16u;j=j+1u){ dx[j] = deltas[o + j]; }
+    dx = subMod(dx, bx);
+    accf = mulMod(accf, dx);
+    prefix[i] = accf;
   }
-  let xy = scalarMulG(key);
-  // compressed pubkey bytes: prefix + big-endian x (x is limbs 0..15, little-endian 16-bit)
-  var pk: array<u32,64>;
-  for (var i=0;i<64;i=i+1){ pk[i] = 0u; }
-  // y parity from y limb 0
-  pk[0] = select(0x02u, 0x03u, (xy[16] & 1u) == 1u);
-  // x big-endian: most significant limb is x[15]
-  for (var i=0;i<16;i=i+1){
-    let limb = xy[15 - i];           // 16-bit
-    pk[1 + i*2]     = (limb >> 8u) & 0xffu;
-    pk[1 + i*2 + 1] = limb & 0xffu;
-  }
-  let sh = sha256_33(pk);
-  let h = ripemd160(sh);
-  // compare against target (params[16..20] are hash160 as 5 little-endian 32-bit words)
-  var matched = true;
-  for (var i=0;i<5;i=i+1){ if (h[i] != params[16 + i]) { matched = false; } }
-  if (matched) {
-    atomicStore(&result[0], 1u);
-    atomicStore(&result[1], tid);
-  }
+  var inv = invMod(prefix[used - 1u]);   // the single inversion for the window
+  // backward pass: recover each inverse, form the point, hash + compare
+  for (var ii=0u; ii<used; ii=ii+1u){
+    let i = used - 1u - ii;
+    var dx: array<u32,16>; var dy: array<u32,16>; let o = i*32u;
+    for (var j=0u;j<16u;j=j+1u){ dx[j] = deltas[o + j]; dy[j] = deltas[o + 16u + j]; }
+    let deltax = dx;                     // original delta x (for x3)
+    dx = subMod(dx, bx);
+    var invdx: array<u32,16>;
+    if (i == 0u) { invdx = inv; } else { invdx = mulMod(inv, prefix[i - 1u]); }
+    inv = mulMod(inv, dx);
+    let lam = mulMod(subMod(dy, by), invdx);   // (y2-y1)/(x2-x1)
+    let x3 = subMod(subMod(sqrMod(lam), bx), deltax);
+    let y3 = subMod(mulMod(lam, subMod(bx, x3)), by);
+    checkPoint(x3, y3, firstKey + 1u + i);
+  }` : ``}
 }
 `; }
 
@@ -1045,7 +1078,7 @@ function keyToLimbs(k) { const o = new Uint32Array(16); for (let i = 0; i < 16; 
 function h160ToWords(bytes) { const w = new Uint32Array(5); for (let i = 0; i < 5; i++) w[i] = (bytes[i*4] | (bytes[i*4+1]<<8) | (bytes[i*4+2]<<16) | (bytes[i*4+3]<<24)) >>> 0; return w; }
 
 class WebGPUSearch {
-  constructor() { this.device = null; this.pipeline = null; this.ok = false; }
+  constructor(W) { this.device = null; this.pipeline = null; this.ok = false; this.W = (W|0) || 16; }
 
   async init() {
     if (!("gpu" in navigator)) return { ok: false, reason: "WebGPU not available in this browser" };
@@ -1055,7 +1088,7 @@ class WebGPUSearch {
     if (!adapter) return { ok: false, reason: "no GPU adapter" };
     this.device = await adapter.requestDevice();
     try {
-      const module = this.device.createShaderModule({ code: SEARCH_WGSL });
+      const module = this.device.createShaderModule({ code: buildSearchWGSL(this.W) });
       // surface compile errors early
       if (module.getCompilationInfo) {
         const info = await module.getCompilationInfo();
@@ -1063,12 +1096,18 @@ class WebGPUSearch {
         if (err) return { ok: false, reason: "WGSL compile error: " + err.message };
       }
       this.pipeline = this.device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "main" } });
-      // Precompute 2^i*G (affine) for i=0..72 and upload once, so the kernel
-      // never recomputes point doublings per key.
+      // Precompute 2^i*G (affine) for i=0..72 and upload once (used to compute
+      // each thread's base point), so the kernel never redoes point doublings.
       const NB = 73, tbl = new Uint32Array(NB * 32);
       for (let i = 0; i < NB; i++) { const p = _smul(1n << BigInt(i)); tbl.set(keyToLimbs(p.x), i*32); tbl.set(keyToLimbs(p.y), i*32 + 16); }
       this.gtableBuf = this.device.createBuffer({ size: tbl.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       this.device.queue.writeBuffer(this.gtableBuf, 0, tbl);
+      // Precompute the delta table {1G, 2G, ..., (W-1)G} (affine) and upload once;
+      // the windowed kernel reuses it for every thread and every dispatch.
+      const WM1 = Math.max(1, this.W - 1), dtbl = new Uint32Array(WM1 * 32);
+      for (let i = 1; i <= this.W - 1; i++) { const p = _smul(BigInt(i)); dtbl.set(keyToLimbs(p.x), (i-1)*32); dtbl.set(keyToLimbs(p.y), (i-1)*32 + 16); }
+      this.deltaBuf = this.device.createBuffer({ size: dtbl.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      this.device.queue.writeBuffer(this.deltaBuf, 0, dtbl);
     } catch (e) { return { ok: false, reason: "pipeline creation failed: " + e.message }; }
     this.adapterInfo = adapter.info || {};
     const st = await this.selfTest();
@@ -1088,11 +1127,12 @@ class WebGPUSearch {
     this.device.queue.writeBuffer(rbuf, 0, new Uint32Array([0, 0, 0]));
     const read = this.device.createBuffer({ size: 12, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     const bind = this.device.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: { buffer: pbuf } }, { binding: 1, resource: { buffer: rbuf } }, { binding: 2, resource: { buffer: this.gtableBuf } }] });
+      { binding: 0, resource: { buffer: pbuf } }, { binding: 1, resource: { buffer: rbuf } }, { binding: 2, resource: { buffer: this.gtableBuf } }, { binding: 3, resource: { buffer: this.deltaBuf } }] });
     const enc = this.device.createCommandEncoder();
     const pass = enc.beginComputePass();
     pass.setPipeline(this.pipeline); pass.setBindGroup(0, bind);
-    pass.dispatchWorkgroups(Math.ceil(count / 64));
+    // Each thread handles W keys, so threads = ceil(count/W), workgroups of 64.
+    pass.dispatchWorkgroups(Math.max(1, Math.ceil(count / (this.W * 64))));
     pass.end();
     enc.copyBufferToBuffer(rbuf, 0, read, 0, 12);
     this.device.queue.submit([enc.finish()]);
@@ -1123,7 +1163,15 @@ class WebGPUSearch {
       // negative: searching base=2 for key 1's hash must NOT match
       const neg = await this.searchBatch(0x2n, hex2b(V[0][1]), 1);
       if (neg.found) return { ok: false, reason: "GPU produced a false positive (falling back to CPU)" };
-      return { ok: true, reason: "GPU pipeline self-test passed", adapter: this.adapterInfo };
+      // windowed path: an in-range #72 base, target = key (base+3) found via the
+      // batch-inversion delta stepping (not the base lane). Validates the new math.
+      const WB = 0x800000000000001000n;
+      const wr = await this.searchBatch(WB, hex2b("e1c52a5b9a345895af90f64f8da52928fccd23d0"), Math.max(8, this.W));
+      if (!wr.found || wr.key !== WB + 3n) return { ok: false, reason: "GPU windowed-stepping self-test failed (falling back to CPU)" };
+      // and it must NOT match a wrong target over the same window
+      const wneg = await this.searchBatch(WB, hex2b("ffffffffffffffffffffffffffffffffffffffff"), Math.max(8, this.W));
+      if (wneg.found) return { ok: false, reason: "GPU windowed false positive (falling back to CPU)" };
+      return { ok: true, reason: "GPU pipeline self-test passed (windowed)", adapter: this.adapterInfo };
     } catch (e) { return { ok: false, reason: "GPU self-test error: " + e.message }; }
   }
 }
