@@ -26,6 +26,10 @@
 #ifndef WIN
 #define WIN 64
 #endif
+// Threads per block (override with -DTPB=..; sweep 128/192/256/384/512 per GPU).
+#ifndef TPB
+#define TPB 256
+#endif
 
 __device__ void hash160_of_key(const uint32_t* key, uint8_t out[20]) {
   uint32_t x[8], y[8];
@@ -254,7 +258,7 @@ static int runStandalone(const uint8_t* targetHost) {
   std::mt19937_64 rng(((uint64_t)time(nullptr)) ^ ((uint64_t)clock() << 21));
   const uint64_t SEG_SIZE = 1ull << 25;
   const uint64_t IDX_MASK = (1ull << 46) - 1;    // 2^71 / 2^25 = 2^46 segments
-  const uint64_t BATCH = 1ull << 22; int threads = 256;
+  const uint64_t BATCH = 1ull << 22; int threads = TPB;
   uint64_t baseDone = done.size(), segThisRun = 0;
 
   while (true) {
@@ -329,7 +333,7 @@ int main(int argc, char** argv) {
   k_build_deltas<<<(WIN-1+63)/64, 64>>>(dDeltas); cudaDeviceSynchronize();
 
   const uint64_t BATCH = 1ull << 22; // keys per launch (tune per GPU)
-  int threads = 256;
+  int threads = TPB;
   uint64_t numThreads = (BATCH + WIN - 1) / WIN;            // each thread does WIN keys
   int blocks = (int)((numThreads + threads - 1) / threads);
 
