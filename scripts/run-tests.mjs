@@ -14,6 +14,7 @@ const suites = [
   ["webgpu field model", "packages/web-webgpu/model/field.test.mjs"],
   ["webgpu EC model", "packages/web-webgpu/model/ec.test.mjs"],
   ["webgpu pipeline model", "packages/web-webgpu/model/pipeline.test.mjs"],
+  ["webgpu kernel model (batch-inversion stepping)", "packages/web-webgpu/model/kernel.test.mjs"],
 ];
 
 let failed = 0;
