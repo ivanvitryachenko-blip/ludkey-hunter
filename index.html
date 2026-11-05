@@ -455,9 +455,11 @@
         <div class="grid g-2">
           <div class="panel"><h3>Compute backend</h3>
             <dl class="kv">
+              <dt>Active Compute Engine</dt><dd id="gpu-engine"><b>CPU</b></dd>
               <dt>Active backend</dt><dd id="gpu-backend">CPU (Web Workers)</dd>
               <dt>WebGPU present</dt><dd id="gpu-present">—</dd>
               <dt>Adapter</dt><dd id="gpu-adapter">—</dd>
+              <dt>Hardware status</dt><dd id="gpu-hw">—</dd>
               <dt>Architecture</dt><dd id="gpu-arch">—</dd>
               <dt>CPU threads</dt><dd id="gpu-threads">—</dd>
               <dt>Active workers</dt><dd id="gpu-workers">0</dd>
@@ -1130,6 +1132,16 @@ class WebGPUSearch {
       this.device.queue.writeBuffer(this.deltaBuf, 0, dtbl);
     } catch (e) { return { ok: false, reason: "pipeline creation failed: " + e.message }; }
     this.adapterInfo = adapter.info || {};
+    // Classify the adapter honestly: a software rasterizer (SwiftShader, llvmpipe,
+    // WARP/Basic Render) is NEVER reported as a hardware GPU; a browser that hides
+    // the adapter is reported as UNVERIFIED, not assumed to be hardware.
+    this.isFallback = !!adapter.isFallbackAdapter;
+    // adapter.info fields are getters (JSON.stringify misses them), so read each.
+    const info = this.adapterInfo;
+    const blob = [info.vendor, info.architecture, info.device, info.description].join(" ").toLowerCase();
+    if (this.isFallback || /swiftshader|llvmpipe|software|basic render|warp|microsoft basic|lavapipe/.test(blob)) this.hwStatus = "Software";
+    else if (info.vendor || info.architecture || info.device) this.hwStatus = "Hardware";
+    else this.hwStatus = "Unverified";
     // On a re-init after device loss, the crypto already passed its self-test
     // this session on this GPU, so skip the (heavy) re-validation to recover fast.
     if (skipSelfTest) { this.ok = true; return { ok: true, reason: "re-init", adapter: this.adapterInfo }; }
@@ -1556,7 +1568,7 @@ async function ensureGpu(){
 
 async function tryStartGpu(start, end, target, isDemo){
   if(!await ensureGpu()) return false;
-  backendLabel = "WebGPU (GPU)";
+  backendLabel = "WebGPU (GPU)"; activeEngine = "gpu";
   const entry = { id:0, scanned:0, speed:0, last:performance.now(), lastScanned:0, status:"running", subStart:start, subEnd:end, cursor:start, base:0, gpu:true };
   pool = [entry];
   running=true; paused=false; sessionStart=performance.now(); maxSpeed=0; speedHistory.length=0; lastAggT=performance.now(); lastAggScanned=0;
@@ -1608,7 +1620,7 @@ async function tryStartHybridSequential(start, end, target, isDemo){
   const workers = Math.max(1, Math.min(32, parseInt($("workers").value)||2));
   const windowSize = Math.max(64, Math.min(8192, parseInt($("window").value)||1024));
   const compressed = $("compressed").checked;
-  backendLabel = "Hybrid (CPU+GPU)";
+  backendLabel = "Hybrid (CPU+GPU)"; activeEngine = "hybrid";
   const parts = splitRange(start, end, workers + 1); // last part to GPU
   pool = [];
   resetAggregate(isDemo?"demo":"puzzle", "0x"+start.toString(16), "0x"+end.toString(16));
@@ -1635,7 +1647,7 @@ async function tryStartHybridRandom(){
   const workers = Math.max(1, Math.min(parseInt($("workers").value)||2, hw - 1));
   const windowSize = Math.max(64, Math.min(8192, parseInt($("window").value)||1024));
   const compressed = $("compressed").checked;
-  backendLabel = "Hybrid (CPU+GPU)";
+  backendLabel = "Hybrid (CPU+GPU)"; activeEngine = "hybrid";
   pool = [];
   resetAggregate("random", "random", "random");
   for(let i=0;i<workers;i++){
@@ -1656,7 +1668,7 @@ async function tryStartHybridRandom(){
 // GPU random no-repeat: scan random undone segments on the GPU, persist covered.
 async function tryStartGpuRandom(){
   if(!await ensureGpu()) return false;
-  backendLabel = "WebGPU (GPU)";
+  backendLabel = "WebGPU (GPU)"; activeEngine = "gpu";
   const entry = { id:0, scanned:0, speed:0, last:performance.now(), lastScanned:0, status:"running", subStart:0n, subEnd:0n, cursor:0n, base:0, chunkIndex:null, gpu:true };
   pool = [entry];
   running=true; paused=false; sessionStart=performance.now(); maxSpeed=0; speedHistory.length=0; lastAggT=performance.now(); lastAggScanned=0;
@@ -1704,6 +1716,15 @@ async function gpuRandomLoop(entry, targetBytes){
   }
 }
 let running = false, paused = false;
+let activeEngine = "cpu";   // what is ACTUALLY running: "cpu" | "gpu" | "hybrid" (never a guess)
+// GPU ONLY was selected but the GPU is unavailable: show an error, never start CPU.
+function gpuUnavailableError(){
+  activeEngine = "none";
+  const why = gpuReason || "WebGPU self-test failed or no hardware GPU";
+  logEvent("crit","GPU ONLY selected but the GPU is unavailable: "+why+". NOT falling back to CPU — pick CPU or Auto to run on the processor.");
+  if($("s-progresstext")) $("s-progresstext").textContent = "GPU unavailable — "+why+". Select CPU or Auto to use the processor.";
+  running = false; setControls();
+}
 let sessionStart = 0, totalPrev = 0;
 let maxSpeed = 0, matches = 0;
 let currentMode = "connected";
@@ -1790,18 +1811,23 @@ async function startSearch(){
   if(mode==="random"){
     chunkBits = Math.max(16, Math.min(40, parseInt($("chunkbits").value)||20));
     try{ localStorage.setItem("ludkey.chunkbits.72", String(chunkBits)); }catch(_){}
-    // GPU / Hybrid path for random mode
-    if(backend==="hybrid" && window.WebGPUSearch){
-      const started = await tryStartHybridRandom();
-      if(started) return;
-      logEvent("warn","Hybrid unavailable (GPU self-test failed) — random on CPU only");
-    } else if((backend==="gpu" || backend==="auto") && window.WebGPUSearch){
-      const started = await tryStartGpuRandom();
-      if(started) return;
+    // GPU / Hybrid path for random mode. GPU ONLY never silently falls back to
+    // CPU — if the GPU is unavailable it errors; only Auto/Hybrid degrade to CPU
+    // and they say so, so CPU speed is never shown as GPU.
+    if(backend==="gpu"){
+      if(window.WebGPUSearch && await tryStartGpuRandom()) return;
+      gpuUnavailableError(); return;                    // ERROR, do NOT start CPU
+    } else if(backend==="hybrid"){
+      if(window.WebGPUSearch && await tryStartHybridRandom()) return;
+      logEvent("warn","Hybrid: GPU unavailable ("+(gpuReason||"self-test failed")+") — running CPU only."); activeEngine="cpu";
+    } else if(backend==="auto"){
+      if(window.WebGPUSearch && await tryStartGpuRandom()) return;
+      logEvent("warn","Auto: GPU unavailable ("+(gpuReason||"self-test failed")+") — running on CPU."); activeEngine="cpu";
     }
     const workers = Math.max(1, Math.min(32, parseInt($("workers").value)||2));
     const windowSize = Math.max(64, Math.min(8192, parseInt($("window").value)||1024));
     const compressed = $("compressed").checked;
+    activeEngine = "cpu";
     pool = [];
     for(let i=0;i<workers;i++){
       const w=new Worker(workerBlobUrl);
@@ -1839,15 +1865,18 @@ async function startSearch(){
   const compressed = $("compressed").checked;
 
   // GPU / Hybrid backend for sequential/demo (random mode handled above).
-  if(backend==="hybrid" && window.WebGPUSearch){
-    const started = await tryStartHybridSequential(start, end, target, mode==="demo");
-    if(started) return;
-    logEvent("warn","Hybrid unavailable (GPU self-test failed) — CPU only");
-  } else if((backend==="gpu" || backend==="auto") && window.WebGPUSearch){
-    const started = await tryStartGpu(start, end, target, mode==="demo");
-    if(started) return;
+  if(backend==="gpu"){
+    if(window.WebGPUSearch && await tryStartGpu(start, end, target, mode==="demo")) return;
+    gpuUnavailableError(); return;                      // ERROR, do NOT start CPU
+  } else if(backend==="hybrid"){
+    if(window.WebGPUSearch && await tryStartHybridSequential(start, end, target, mode==="demo")) return;
+    logEvent("warn","Hybrid: GPU unavailable ("+(gpuReason||"self-test failed")+") — running CPU only."); activeEngine="cpu";
+  } else if(backend==="auto"){
+    if(window.WebGPUSearch && await tryStartGpu(start, end, target, mode==="demo")) return;
+    logEvent("warn","Auto: GPU unavailable ("+(gpuReason||"self-test failed")+") — running on CPU."); activeEngine="cpu";
   }
 
+  activeEngine = "cpu";
   const ranges = splitRange(start, end, workers);
   const resume = mode==="puzzle" ? loadResumePositions(start, end) : null;
   let resumedKeys = 0n;
@@ -2062,10 +2091,16 @@ function renderFrame(){
   renderWorkerTable();
   renderProjection(t.speed||avg||maxSpeed);
 
-  // GPU monitor
+  // GPU monitor — honest, separated CPU vs GPU (never show CPU speed as GPU)
+  const gpuEntries = pool.filter(p=>p.gpu), cpuEntries = pool.filter(p=>!p.gpu);
+  const gpuSpeed = gpuEntries.reduce((a,p)=>a+(p.speed||0),0);
+  const cpuSpeed = cpuEntries.reduce((a,p)=>a+(p.speed||0),0);
+  const eng = !running ? "IDLE" : activeEngine.toUpperCase();
+  $("gpu-engine").innerHTML = "<b>"+eng+"</b>" + (running&&activeEngine==="hybrid" ? " — GPU "+fmtSpeed(gpuSpeed)+" + CPU "+fmtSpeed(cpuSpeed) : running&&activeEngine==="gpu" ? " — "+fmtSpeed(gpuSpeed)+" (GPU)" : running&&activeEngine==="cpu" ? " — "+fmtSpeed(cpuSpeed)+" ("+cpuEntries.length+" CPU workers)" : "");
   $("gpu-speed").textContent = fmtSpeed(t.speed);
-  $("gpu-workers").textContent = pool.some(p=>p.gpu) ? "GPU dispatch" : t.activeWorkers;
+  $("gpu-workers").textContent = (gpuEntries.length? "GPU×"+gpuEntries.length : "") + (gpuEntries.length&&cpuEntries.length?" + ":"") + (cpuEntries.length? cpuEntries.length+" CPU" : (gpuEntries.length?"":"0"));
   $("gpu-backend").textContent = backendLabel;
+  if(gpuEngine && gpuEngine.hwStatus) $("gpu-hw").textContent = gpuEngine.hwStatus + (gpuEngine.hwStatus==="Software"?" ⚠ (not a hardware GPU)":"");
 
   // Devices
   renderDevices(t);
@@ -2386,6 +2421,7 @@ async function runBench(seconds){
     if(gok){ try{ localStorage.setItem("ludkey.gpuW", String(wSel)); localStorage.setItem("ludkey.gpuWG", String(wgSel)); }catch(_){} }
     const rows=[];
     rows.push(["WebGPU self-test", gok? ("PASS — "+((gpuEngine.adapterInfo&&(gpuEngine.adapterInfo.architecture||gpuEngine.adapterInfo.vendor))||"gpu")) : ("FAIL / unavailable — "+(gpuReason||"no WebGPU"))]);
+    if(gok&&gpuEngine) rows.push(["Hardware status", gpuEngine.hwStatus + (gpuEngine.hwStatus==="Software"?" ⚠ software rasterizer — NOT your GTX/GPU":gpuEngine.hwStatus==="Unverified"?" (browser hid adapter details)":"")]);
     if(gpuEngine){ rows.push(["Config", "W="+gpuEngine.W+" · workgroup="+gpuEngine.WG]);
       const L=gpuEngine.device&&gpuEngine.device.limits;
       if(L){ rows.push(["maxComputeWorkgroupsPerDim", String(L.maxComputeWorkgroupsPerDimension)]); rows.push(["maxStorageBufferBinding", (L.maxStorageBufferBindingSize>>20)+" MiB"]); rows.push(["maxComputeInvocations/wg", String(L.maxComputeInvocationsPerWorkgroup)]); }
@@ -2496,12 +2532,19 @@ async function detectGPU(){
   $("gpu-threads").textContent = navigator.hardwareConcurrency||"unknown";
   if("gpu" in navigator){
     webgpuPresent=true; $("gpu-present").innerHTML="<span class='chip good'>yes</span>";
-    try{ const ad=await navigator.gpu.requestAdapter();
+    try{ const ad=await navigator.gpu.requestAdapter({ powerPreference:"high-performance" });
       if(ad){ const info = ad.info || (ad.requestAdapterInfo? await ad.requestAdapterInfo():{});
-        $("gpu-adapter").textContent = (info.vendor||"")+" "+(info.architecture||info.device||"adapter")|| "available";
+        $("gpu-adapter").textContent = ((info.vendor||"")+" "+(info.architecture||info.device||"adapter")).trim()|| "available";
         $("gpu-arch").textContent = info.architecture||"—";
-        $("gpuNote").innerHTML="WebGPU is <b>available</b> on this device. This standalone build computes on CPU workers (portable, verified). The WebGPU/WGSL acceleration kernel ships in the project source and can be enabled where the browser exposes it.";
-      } else { $("gpu-adapter").textContent="no adapter"; $("gpuNote").textContent="WebGPU API present but no adapter was granted."; }
+        // Honest hardware classification (software rasterizer / hidden / real GPU).
+        const blob=[info.vendor,info.architecture,info.device,info.description].join(" ").toLowerCase();
+        const hw = ad.isFallbackAdapter||/swiftshader|llvmpipe|software|basic render|warp|microsoft basic|lavapipe/.test(blob) ? "Software"
+                 : (info.vendor||info.architecture||info.device) ? "Hardware" : "Unverified";
+        $("gpu-hw").innerHTML = hw==="Software" ? "<span class='chip warn'>Software</span> ⚠ not a hardware GPU"
+                              : hw==="Hardware" ? "<span class='chip good'>Hardware</span>"
+                              : "<span class='chip'>Unverified</span> (browser hid adapter details)";
+        $("gpuNote").innerHTML="WebGPU is <b>available</b>. Select backend <b>GPU</b> in Search to run the full crypto chain on the GPU (gated by a self-test). GPU-only never silently falls back to CPU.";
+      } else { $("gpu-adapter").textContent="no adapter"; $("gpu-hw").textContent="no adapter"; $("gpuNote").textContent="WebGPU API present but no adapter was granted."; }
     }catch(e){ $("gpu-adapter").textContent="error: "+e.message; }
   } else {
     $("gpu-present").innerHTML="<span class='chip warn'>no</span>";
