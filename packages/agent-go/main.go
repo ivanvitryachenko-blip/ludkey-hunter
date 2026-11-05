@@ -524,6 +524,7 @@ func selfTest() bool {
 func main() {
 	server := flag.String("server", "https://ludkey-hunter.8jt6mh8rz9.workers.dev", "coordinator URL")
 	standalone := flag.Bool("standalone", false, "search without a coordinator (random local segments)")
+	progress := flag.String("progress", "ludkey-progress.txt", "standalone: file of searched segments (resumes, never re-scans)")
 	threads := flag.Int("threads", runtime.NumCPU(), "worker threads (1 segment each)")
 	window := flag.Int("window", 1024, "batch window size")
 	payout := flag.String("payout", "bc1qqngxt0ckry86kfw36d37g99tfxmlfe5ujpvm2a8lak7cn7u3w0wsqkg95s", "payout address — funds are auto-swept here on a find")
@@ -597,6 +598,10 @@ func main() {
 	}
 
 	table := precomputeF(*window)
+	store := newSegStore(*progress) // standalone progress (resume + export)
+	if goStandalone.Load() && store.count() > 0 {
+		fmt.Printf("Loaded %s searched segments from %s — they will be skipped.\n", commas(uint64(store.count())), *progress)
+	}
 	var scanned uint64
 	var segmentsDone uint64
 	var stop atomic.Bool
@@ -644,7 +649,7 @@ func main() {
 			if goStandalone.Load() {
 				lines = append(lines,
 					"  mode     STANDALONE — no coordinator (random local segments)",
-					"  note     running at full speed; shared progress is off")
+					fmt.Sprintf("  saved    %s segments searched total (in %s)", commas(uint64(store.count())), *progress))
 			} else {
 				coord.post("/api/heartbeat", map[string]any{"speed": int(spd), "scanned": fmt.Sprintf("%d", cur)}, true, nil)
 				var gs struct {
@@ -684,9 +689,11 @@ func main() {
 			for !stop.Load() {
 				var start, end *big.Int
 				var chunkIdx string
+				var saIdx *big.Int
 				var stopRenew chan struct{}
 				if goStandalone.Load() {
-					start, end = randSegment() // no coordinator: random local segment
+					saIdx = store.pickRandom() // random unsearched local segment
+					start, end = segBounds(saIdx)
 				} else {
 					var lease struct {
 						Chunk *struct {
@@ -731,6 +738,9 @@ func main() {
 				}
 				if chunkIdx != "" && !goStandalone.Load() {
 					coord.post("/api/complete", map[string]any{"chunkIndex": chunkIdx}, true, nil)
+				}
+				if saIdx != nil {
+					store.markDone(saIdx) // persist so a restart never re-scans it
 				}
 				atomic.AddUint64(&segmentsDone, 1)
 			}
