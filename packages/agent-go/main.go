@@ -646,8 +646,25 @@ func main() {
 		}
 		var last uint64
 		lastT := time.Now()
+		// Shared-status snapshot persists between fetches so the panel redraws
+		// every 2s locally while the coordinator is only contacted every ~20s.
+		var gs struct {
+			Summary struct {
+				Done     int     `json:"done"`
+				Assigned int     `json:"assigned"`
+				Percent  float64 `json:"percent"`
+			} `json:"summary"`
+			TotalSpeed float64 `json:"totalSpeed"`
+			Devices    []struct {
+				Online bool `json:"online"`
+			} `json:"devices"`
+		}
+		online := 0
+		tick := 0
+		const netEvery = 10 // 10 × 2s = ~20s between coordinator calls
 		for !stop.Load() {
 			time.Sleep(2 * time.Second)
+			tick++
 			cur := atomic.LoadUint64(&scanned)
 			dt := time.Since(lastT).Seconds()
 			spd := float64(cur-last) / dt
@@ -666,23 +683,16 @@ func main() {
 					"  mode     STANDALONE — no coordinator (random local segments)",
 					fmt.Sprintf("  saved    %s segments searched total (in %s)", commas(uint64(store.count())), *progress))
 			} else {
-				coord.post("/api/heartbeat", map[string]any{"speed": int(spd), "scanned": fmt.Sprintf("%d", cur)}, true, nil)
-				var gs struct {
-					Summary struct {
-						Done     int     `json:"done"`
-						Assigned int     `json:"assigned"`
-						Percent  float64 `json:"percent"`
-					} `json:"summary"`
-					TotalSpeed float64 `json:"totalSpeed"`
-					Devices    []struct {
-						Online bool `json:"online"`
-					} `json:"devices"`
-				}
-				coord.getJSON("/api/status", &gs)
-				online := 0
-				for _, d := range gs.Devices {
-					if d.Online {
-						online++
+				// Contact the coordinator only every ~20s (heartbeat + status),
+				// not every redraw, to stay well within free-tier request limits.
+				if tick%netEvery == 1 {
+					coord.post("/api/heartbeat", map[string]any{"speed": int(spd), "scanned": fmt.Sprintf("%d", cur)}, true, nil)
+					coord.getJSON("/api/status", &gs)
+					online = 0
+					for _, d := range gs.Devices {
+						if d.Online {
+							online++
+						}
 					}
 				}
 				lines = append(lines,

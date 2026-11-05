@@ -1361,12 +1361,12 @@ function connHeartbeat(){
     try{ await connApi("/api/heartbeat","POST",{ speed:Math.round(spd), scanned:String(cum) }); }catch(_){}
     // keep every in-flight segment's lease alive (one per active worker)
     for(const p of pool){ if(p.chunkIndex!=null){ try{ await connApi("/api/heartbeat","POST",{ chunkIndex:p.chunkIndex }); }catch(_){} } }
-  }, 4000);
+  }, 20000); // 20s: well below the 10-min lease TTL, ~5x fewer requests than 4s
 }
 function connStatusPoll(){
   clearInterval(connStTimer);
   const poll = async ()=>{ if(currentMode!=="connected") { clearInterval(connStTimer); return; } try{ serverStatus = await (await fetch(connServer+"/api/status")).json(); }catch(_){} };
-  poll(); connStTimer = setInterval(poll, 5000);
+  poll(); connStTimer = setInterval(poll, 10000); // 10s dashboard refresh
 }
 
 /* ---------------- Shared mode via Claude artifact db (NO server) ---------------- */
@@ -1434,7 +1434,7 @@ function sharedHeartbeat(){
     const t = totals(); const sc = sharedScanned + (pool[0]? Number(pool.reduce((a,p)=>a+(p.conn?(p.cursor-p.subStart):0n),0n)) : 0);
     try{ await sharedDb.doc("devices/"+myDevId).update({ speed:Math.round(t.speed), scanned:sc, lastSeen:Date.now() }); }
     catch(_){ try{ await sharedDb.doc("devices/"+myDevId).set({ name:deviceType(), type:deviceType(), speed:Math.round(t.speed), scanned:sc, lastSeen:Date.now() }); }catch(__){} }
-  }, 5000);
+  }, 20000);
 }
 function sharedCleanup(){ clearInterval(sharedHbTimer); sharedUnsub.forEach(u=>{ try{u();}catch(_){} }); sharedUnsub=[]; }
 function bytesToHexLocal(b){ let s=""; for(let i=0;i<b.length;i++) s+=b[i].toString(16).padStart(2,"0"); return s; }

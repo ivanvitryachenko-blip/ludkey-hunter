@@ -24,7 +24,7 @@ interface Device { id: string; token: string; name: string; type: string; gpu?: 
 let DATA_DIR = "./data";
 let STATE_FILE = join(DATA_DIR, "state.json");
 let MATCH_FILE = join(DATA_DIR, "FOUND_KEY.json"); // local only, never served
-let CHUNK_SIZE = 1n << 25n;
+let CHUNK_SIZE = 1n << 30n; // coordination grain (2^30); override with LUDKEY_CHUNK
 let PORT = 8071;
 
 let allocator = new RangeAllocator(PUZZLE_72.rangeStart, PUZZLE_72.rangeEnd, CHUNK_SIZE);
@@ -244,7 +244,7 @@ export function start() {
   DATA_DIR = process.env.LUDKEY_DATA || "./data";
   STATE_FILE = join(DATA_DIR, "state.json");
   MATCH_FILE = join(DATA_DIR, "FOUND_KEY.json");
-  CHUNK_SIZE = BigInt(process.env.LUDKEY_CHUNK || (1n << 25n).toString());
+  CHUNK_SIZE = BigInt(process.env.LUDKEY_CHUNK || (1n << 30n).toString());
   PORT = Number(process.env.PORT || 8071);
   allocator = new RangeAllocator(PUZZLE_72.rangeStart, PUZZLE_72.rangeEnd, CHUNK_SIZE);
   loadState();

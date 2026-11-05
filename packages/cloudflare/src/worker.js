@@ -34,7 +34,12 @@ const PUZZLE = {
   rangeStart: 1n << 71n,          // 0x800000000000000000
   rangeEnd: (1n << 72n) - 1n,     // 0xffffffffffffffffff
 };
-const DEFAULT_CHUNK_BITS = 25n;   // 2^25 keys per segment (task spec)
+// Coordinator lease granularity. 2^30 keys per lease keeps lease/complete
+// round-trips ~32x lower than 2^25, so connected mode stays within the free
+// tier even with several fast devices. This is ONLY the coordination grain —
+// devices still search every key; the local standalone 2^25 segmentation and
+// the search algorithm are unchanged. Override with the CHUNK_BITS var.
+const DEFAULT_CHUNK_BITS = 30n;   // 2^30 keys per leased segment
 const LEASE_MS = 10 * 60 * 1000;  // 10 minutes
 // Abuse limits: cap total registered devices and throttle registration per IP
 // so nobody can flood the coordinator with devices (storage/DoS abuse).

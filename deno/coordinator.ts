@@ -23,7 +23,7 @@ const PUZZLE = {
 const KEYSPACE = PUZZLE.rangeEnd - PUZZLE.rangeStart + 1n; // 2^71
 const CHUNK_SIZE = (() => {
   try { const v = (globalThis as any).Deno?.env.get("LUDKEY_CHUNK"); if (v) return BigInt(v); } catch { /* ignore */ }
-  return 1n << 25n; // 2^25 keys per segment
+  return 1n << 30n; // 2^30 keys per leased segment (coordination grain; ~32x fewer round-trips than 2^25)
 })();
 const CHUNK_COUNT = (KEYSPACE + CHUNK_SIZE - 1n) / CHUNK_SIZE; // 2^46
 const LEASE_MS = 10 * 60 * 1000;

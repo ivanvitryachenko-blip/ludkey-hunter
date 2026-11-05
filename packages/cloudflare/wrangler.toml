@@ -28,6 +28,7 @@ class_name = "Coordinator"
 tag = "v1"
 new_sqlite_classes = ["Coordinator"]
 
-# Optional: change the segment size (default 2^25). Example for 2^20:
+# Optional: change the lease segment size (default 2^30, chosen to keep
+# lease/complete request volume low for the free tier). Example for 2^25:
 # [vars]
-# CHUNK_BITS = "20"
+# CHUNK_BITS = "25"
