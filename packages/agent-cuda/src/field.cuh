@@ -46,24 +46,30 @@ __device__ void mod_mul(uint32_t* r, const uint32_t* a, const uint32_t* b) {
     }
     t[i + 8] += (uint32_t)carry;
   }
-  // Fold high 256 bits (t[8..15]) into low using 2^256 ≡ 0x1000003D1.
-  // Repeat until the high part is zero (at most twice).
-  for (int pass = 0; pass < 2; ++pass) {
-    uint64_t carry = 0;
+  // Fold the high limbs (t[8..15]) into the low using 2^256 ≡ 2^32 + 977 (mod p):
+  // high*K contributes high*977 at position 0 and high<<32 at position 1. Carries
+  // out of the low 8 limbs are propagated back into the high limbs and folded
+  // again, repeating until the whole high half is zero (converges in a few passes).
+  for (int pass = 0; pass < 8; ++pass) {
+    bool anyHigh = false;
+    for (int i = 8; i < 16; ++i) if (t[i]) { anyHigh = true; break; }
+    if (!anyHigh) break;
     uint32_t hi[8];
     for (int i = 0; i < 8; ++i) { hi[i] = t[i + 8]; t[i + 8] = 0; }
-    // low += hi * 0x1000003D1
+    // low += hi * 977
+    uint64_t carry = 0;
     for (int i = 0; i < 8; ++i) {
-      uint64_t cur = (uint64_t)t[i] + (uint64_t)hi[i] * 0x3D1ULL + carry;
+      uint64_t cur = (uint64_t)t[i] + (uint64_t)hi[i] * 977ULL + carry;
       t[i] = (uint32_t)cur; carry = cur >> 32;
     }
-    // + hi << 32  (the 2^32 term)
+    for (int i = 8; i < 16 && carry; ++i) { uint64_t cur = (uint64_t)t[i] + carry; t[i] = (uint32_t)cur; carry = cur >> 32; }
+    // low += hi << 32  (add hi[i] at position i+1)
     uint64_t c2 = 0;
     for (int i = 0; i < 8; ++i) {
       uint64_t cur = (uint64_t)t[i + 1] + hi[i] + c2;
       t[i + 1] = (uint32_t)cur; c2 = cur >> 32;
     }
-    t[9] += (uint32_t)(carry); // absorb remaining carries into high for next pass
+    for (int i = 9; i < 16 && c2; ++i) { uint64_t cur = (uint64_t)t[i] + c2; t[i] = (uint32_t)cur; c2 = cur >> 32; }
   }
   for (int i = 0; i < 8; ++i) r[i] = t[i];
   // final conditional subtractions
