@@ -746,7 +746,9 @@ func main() {
 							select {
 							case <-done:
 								return
-							case <-time.After(60 * time.Second):
+							// Renew well under the 10-min lease TTL, but not every
+							// minute — 4-min renewals cut request volume ~4x.
+							case <-time.After(240 * time.Second):
 								coord.post("/api/heartbeat", map[string]any{"chunkIndex": idx}, true, nil)
 							}
 						}
