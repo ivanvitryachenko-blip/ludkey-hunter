@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"math/big"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,15 +54,37 @@ type segStore struct {
 
 func newSegStore(path string) *segStore {
 	s := &segStore{done: map[string]struct{}{}, inflight: map[string]struct{}{}, path: path}
-	if f, err := os.Open(path); err == nil {
-		sc := bufio.NewScanner(f)
-		sc.Buffer(make([]byte, 1024*1024), 1024*1024)
-		for sc.Scan() {
-			if l := strings.TrimSpace(sc.Text()); l != "" {
-				s.done[l] = struct{}{}
+	loadInto := func(p string) int {
+		n := 0
+		if f, err := os.Open(p); err == nil {
+			sc := bufio.NewScanner(f)
+			sc.Buffer(make([]byte, 1024*1024), 1024*1024)
+			for sc.Scan() {
+				if l := strings.TrimSpace(sc.Text()); l != "" {
+					if _, ok := s.done[l]; !ok {
+						s.done[l] = struct{}{}
+						n++
+					}
+				}
+			}
+			f.Close()
+		}
+		return n
+	}
+	loadInto(path)
+	// Also skip segments a sibling agent (e.g. the CUDA GPU agent) has already
+	// completed: read every ludkey-progress*.txt next to this file, read-only, so
+	// CPU and GPU running together never re-scan each other's segments.
+	dir := filepath.Dir(path)
+	if dir == "" {
+		dir = "."
+	}
+	if matches, err := filepath.Glob(filepath.Join(dir, "ludkey-progress*.txt")); err == nil {
+		for _, m := range matches {
+			if m != path {
+				loadInto(m)
 			}
 		}
-		f.Close()
 	}
 	s.f, _ = os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	return s

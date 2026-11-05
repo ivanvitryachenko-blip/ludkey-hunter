@@ -15,6 +15,9 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
+#include <ctime>
+#include <random>
+#include <unordered_set>
 #include "ec.cuh"
 #include "sha256.cuh"
 #include "ripemd160.cuh"
@@ -204,6 +207,95 @@ static bool validate() {
   return ok;
 }
 
+// ---- standalone mode: search random 2^25 segments of #72 on the GPU, sharing
+// progress with the Go CPU agent so the two run together without overlap ----
+#define GPU_PROGRESS "ludkey-progress-gpu.txt"
+#define PUZZLE_ADDR  "1JTK7s9YVYywfm5XUH7RNhHJH1LshCaRFR"
+
+// Build the 8x32 limb key for Puzzle #72 = 2^71 + idx*2^25 + sub, using only
+// 64-bit math (MSVC/nvcc on Windows has no __int128). idx < 2^46, sub < 2^25.
+static void keyFromSeg(uint64_t idx, uint64_t sub, uint32_t key[8]) {
+  for (int i = 0; i < 8; ++i) key[i] = 0;
+  auto addLimbs = [&](const uint32_t add[8]) {
+    uint64_t c = 0;
+    for (int i = 0; i < 8; ++i) { uint64_t s = (uint64_t)key[i] + add[i] + c; key[i] = (uint32_t)s; c = s >> 32; }
+  };
+  { uint32_t a[8] = {0}; a[0] = (uint32_t)sub; a[1] = (uint32_t)(sub >> 32); addLimbs(a); }            // + sub
+  { uint64_t lo = idx << 25, hi = idx >> 39;                                                           // idx*2^25 as 128-bit hi:lo
+    uint32_t a[8] = { (uint32_t)lo, (uint32_t)(lo >> 32), (uint32_t)hi, (uint32_t)(hi >> 32), 0,0,0,0 }; addLimbs(a); }
+  { uint32_t a[8] = {0}; a[2] = 0x80; addLimbs(a); }                                                   // + 2^71 (bit 71)
+}
+// Big-endian hex of an 8x32 key, leading zeros trimmed.
+static void keyHex(const uint32_t key[8], char* out) {
+  int top = 7; while (top > 0 && key[top] == 0) --top;
+  int p = 0; char first[9]; sprintf(first, "%x", key[top]); for (char* c = first; *c; ++c) out[p++] = *c;
+  for (int i = top - 1; i >= 0; --i) { sprintf(out + p, "%08x", key[i]); p += 8; }
+  out[p] = 0;
+}
+static void loadProgress(std::unordered_set<uint64_t>& done, const char* path) {
+  FILE* f = fopen(path, "r"); if (!f) return;
+  char line[64];
+  while (fgets(line, sizeof(line), f)) { if (line[0] >= '0' && line[0] <= '9') done.insert(strtoull(line, nullptr, 10)); }
+  fclose(f);
+}
+
+static int runStandalone(const uint8_t* targetHost) {
+  std::unordered_set<uint64_t> done;
+  loadProgress(done, "ludkey-progress.txt");  // the Go CPU agent's file
+  loadProgress(done, GPU_PROGRESS);           // our own
+  printf("[standalone] loaded %zu done segments; GPU searching random 2^25 segments of #72\n", done.size());
+  printf("[standalone] progress file: %s (CPU agent's ludkey-progress.txt is also skipped)\n", GPU_PROGRESS);
+
+  uint32_t *dBase, *dDeltas; uint8_t *dTarget; uint64_t *dFoundOff; int *dFoundFlag;
+  cudaMalloc(&dBase, 8*4); cudaMalloc(&dDeltas, (WIN-1)*16*4); cudaMalloc(&dTarget, 20); cudaMalloc(&dFoundOff, 8); cudaMalloc(&dFoundFlag, 4);
+  cudaMemcpy(dTarget, targetHost, 20, cudaMemcpyHostToDevice);
+  k_build_deltas<<<(WIN-1+63)/64, 64>>>(dDeltas); cudaDeviceSynchronize();
+
+  std::mt19937_64 rng(((uint64_t)time(nullptr)) ^ ((uint64_t)clock() << 21));
+  const uint64_t SEG_SIZE = 1ull << 25;
+  const uint64_t IDX_MASK = (1ull << 46) - 1;    // 2^71 / 2^25 = 2^46 segments
+  const uint64_t BATCH = 1ull << 22; int threads = 256;
+  uint64_t baseDone = done.size(), segThisRun = 0;
+
+  while (true) {
+    uint64_t idx; int tries = 0;
+    do { idx = rng() & IDX_MASK; } while (done.count(idx) && ++tries < 64);
+    done.insert(idx);
+
+    uint64_t scanned = 0; bool found = false; uint64_t foundOff = 0;
+    clock_t t0 = clock();
+    while (scanned < SEG_SIZE) {
+      uint64_t cnt = (SEG_SIZE - scanned < BATCH) ? (SEG_SIZE - scanned) : BATCH;
+      uint32_t base[8]; keyFromSeg(idx, scanned, base);
+      cudaMemcpy(dBase, base, 8*4, cudaMemcpyHostToDevice); cudaMemset(dFoundFlag, 0, 4);
+      uint64_t numThreads = (cnt + WIN - 1) / WIN; int blocks = (int)((numThreads + threads - 1) / threads);
+      k_search_windowed<<<blocks, threads>>>(dBase, cnt, dTarget, dDeltas, dFoundOff, dFoundFlag);
+      cudaDeviceSynchronize();
+      cudaError_t e = cudaGetLastError();
+      if (e != cudaSuccess) { printf("\n[standalone] kernel error: %s (try a smaller WIN)\n", cudaGetErrorString(e)); return 3; }
+      int flag; cudaMemcpy(&flag, dFoundFlag, 4, cudaMemcpyDeviceToHost);
+      if (flag) { uint64_t off; cudaMemcpy(&off, dFoundOff, 8, cudaMemcpyDeviceToHost); found = true; foundOff = scanned + off; break; }
+      scanned += cnt;
+    }
+
+    if (found) {
+      uint32_t fk[8]; keyFromSeg(idx, foundOff, fk);
+      char hx[80]; keyHex(fk, hx);
+      FILE* ff = fopen("FOUND_KEY.txt", "w");
+      if (ff) { fprintf(ff, "when: standalone GPU\nprivate key (hex): 0x%s\naddress: %s\n", hx, PUZZLE_ADDR); fclose(ff); }
+      printf("\n\n*** MATCH *** private key = 0x%s\n  saved to FOUND_KEY.txt — import the key and sweep (the Go agent can auto-sweep)\n", hx);
+      return 0;
+    }
+    FILE* pf = fopen(GPU_PROGRESS, "a"); if (pf) { fprintf(pf, "%llu\n", (unsigned long long)idx); fflush(pf); fclose(pf); }
+    segThisRun++;
+    double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
+    double mkps = secs > 0 ? (SEG_SIZE / secs) / 1e6 : 0;
+    printf("\r[standalone] %llu segments done (%llu total) · %.2f Mkey/s · W=%d       ",
+           (unsigned long long)segThisRun, (unsigned long long)(baseDone + segThisRun), mkps, WIN);
+    fflush(stdout);
+  }
+}
+
 int main(int argc, char** argv) {
   int dev = 0; cudaDeviceProp prop;
   if (cudaGetDeviceProperties(&prop, dev) != cudaSuccess) { printf("No CUDA device found.\n"); return 1; }
@@ -218,6 +310,10 @@ int main(int argc, char** argv) {
   // Puzzle #72 target hash160 (checksum-verified in the TS core).
   const char* TARGET_HEX = "bf7413e8df4e7a34ce9dc13e2f2648783ec54adb";
   uint8_t target[20]; for (int i = 0; i < 20; ++i) sscanf(TARGET_HEX + i*2, "%2x", (unsigned*)&target[i]);
+
+  // Standalone production search: random 2^25 segments, shared progress with the
+  // Go CPU agent (run both together for CPU+GPU combined throughput).
+  for (int i = 1; i < argc; ++i) if (strcmp(argv[i], "--standalone") == 0) return runStandalone(target);
 
   // Demo/bench base: start of #72 range. A real run gets its base chunk from the
   // coordination server (see README for the HTTP protocol; identical to the
