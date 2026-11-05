@@ -459,6 +459,7 @@
             <button class="btn ghost" id="bench-long" type="button">▶ Full (60s each)</button>
             <button class="btn" id="bench-auto" type="button">⚙ Auto-tune W</button>
             <label class="field" style="margin:0;">GPU window W<select id="bench-w"><option value="8">8</option><option value="16">16</option><option value="32">32</option><option value="64">64</option><option value="96" selected>96</option><option value="128">128</option><option value="192">192</option><option value="256">256</option></select></label>
+            <label class="field" style="margin:0;">Workgroup<select id="bench-wg"><option value="32">32</option><option value="64" selected>64</option><option value="128">128</option><option value="256">256</option></select></label>
             <span class="hint" id="bench-status"></span>
           </div>
           <p class="hint">Try several W values and keep the fastest on your device — larger W means one field inversion amortised over more keys, but more GPU memory per thread. The best W is device-specific (that's why it's measured, not fixed).</p>
@@ -901,9 +902,9 @@ fn scalarMulG(key: array<u32,16>) -> array<u32,32> {
 `;
 // Assemble the full search shader for a given window size W (keys per thread).
 // W is baked in at compile time so the per-thread prefix array is fixed-size.
-function buildSearchWGSL(W) { return FIELD_EC_WGSL + SHA256_RIPEMD_WGSL(W); }
+function buildSearchWGSL(W, WG) { return FIELD_EC_WGSL + SHA256_RIPEMD_WGSL(W, WG); }
 
-function SHA256_RIPEMD_WGSL(W) { const WM1 = (W|0) - 1; return /* wgsl */ `
+function SHA256_RIPEMD_WGSL(W, WG) { const WM1 = (W|0) - 1; WG = (WG|0) || 64; return /* wgsl */ `
 // ---- SHA-256 (one block, msg<=55 bytes) over a byte array in a 64-u32 buffer ----
 var<private> SK: array<u32,64> = array<u32,64>(
 0x428a2f98u,0x71374491u,0xb5c0fbcfu,0xe9b5dba5u,0x3956c25bu,0x59f111f1u,0x923f82a4u,0xab1c5ed5u,
@@ -1015,7 +1016,7 @@ fn checkPoint(x: array<u32,16>, y: array<u32,16>, keyIdx: u32) {
 // then derives WIN-1 consecutive points by affine addition of the precomputed
 // iG deltas, using a SINGLE Montgomery batch inversion for the whole window.
 // This removes the per-key scalar mul and per-key inversion of the old kernel.
-@compute @workgroup_size(64)
+@compute @workgroup_size(${WG})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let tid = gid.x;
   let count = params[21];
@@ -1070,7 +1071,7 @@ function keyToLimbs(k) { const o = new Uint32Array(16); for (let i = 0; i < 16; 
 function h160ToWords(bytes) { const w = new Uint32Array(5); for (let i = 0; i < 5; i++) w[i] = (bytes[i*4] | (bytes[i*4+1]<<8) | (bytes[i*4+2]<<16) | (bytes[i*4+3]<<24)) >>> 0; return w; }
 
 class WebGPUSearch {
-  constructor(W) { this.device = null; this.pipeline = null; this.ok = false; this.W = (W|0) || 16; }
+  constructor(W, WG) { this.device = null; this.pipeline = null; this.ok = false; this.W = (W|0) || 16; this.WG = (WG|0) || 64; }
 
   async init() {
     if (!("gpu" in navigator)) return { ok: false, reason: "WebGPU not available in this browser" };
@@ -1083,7 +1084,7 @@ class WebGPUSearch {
     // engine not-ok so the next search re-initialises or falls back to CPU.
     try { this.device.lost.then((info) => { this.ok = false; this.pipeline = null; this.lostReason = (info && info.reason) || "device lost"; }); } catch (_) {}
     try {
-      const module = this.device.createShaderModule({ code: buildSearchWGSL(this.W) });
+      const module = this.device.createShaderModule({ code: buildSearchWGSL(this.W, this.WG) });
       // surface compile errors early
       if (module.getCompilationInfo) {
         const info = await module.getCompilationInfo();
@@ -1126,8 +1127,8 @@ class WebGPUSearch {
     const enc = this.device.createCommandEncoder();
     const pass = enc.beginComputePass();
     pass.setPipeline(this.pipeline); pass.setBindGroup(0, bind);
-    // Each thread handles W keys, so threads = ceil(count/W), workgroups of 64.
-    pass.dispatchWorkgroups(Math.max(1, Math.ceil(count / (this.W * 64))));
+    // Each thread handles W keys; workgroups of WG threads.
+    pass.dispatchWorkgroups(Math.max(1, Math.ceil(count / (this.W * this.WG))));
     pass.end();
     enc.copyBufferToBuffer(rbuf, 0, read, 0, 12);
     this.device.queue.submit([enc.finish()]);
@@ -1498,9 +1499,8 @@ function startRandomLocal(){
 let gpuReason = "";
 async function ensureGpu(){
   if(!window.WebGPUSearch){ gpuReason="window.WebGPUSearch missing"; return false; }
-  // Use the window size the user tuned on this device (default 64 — measured as
-  // the fast point on modern mobile GPUs; bigger W amortises the inversion more).
-  if(!gpuEngine || gpuEngine.W!==gpuW()) gpuEngine = new window.WebGPUSearch(gpuW());
+  // Use the window size + workgroup size the user tuned on this device.
+  if(!gpuEngine || gpuEngine.W!==gpuW() || gpuEngine.WG!==gpuWG()) gpuEngine = new window.WebGPUSearch(gpuW(), gpuWG());
   if(gpuEngine.ok) return true;
   logEvent("info","Initializing WebGPU and running the on-device self-test…");
   gpuReason = ("gpu" in navigator) ? "" : "navigator.gpu missing (WebGPU off in this browser)";
@@ -2280,6 +2280,7 @@ function wireTools(){
 // ---- Benchmark: measured CPU vs GPU throughput on this device (no fake numbers) ----
 // The GPU window size the real search uses, tuned per-device via the benchmark.
 function gpuW(){ try{ const v=parseInt(localStorage.getItem("ludkey.gpuW")); if(v>=1&&v<=256) return v; }catch(_){} return 96; }
+function gpuWG(){ try{ const v=parseInt(localStorage.getItem("ludkey.gpuWG")); if(v===32||v===64||v===128||v===256) return v; }catch(_){} return 64; }
 let benchBusy=false;
 async function runGpuBench(seconds){
   const g=gpuEngine; const target=hexToBytes(PUZZLE.h160); // real target: never matches in a short run
@@ -2313,16 +2314,17 @@ async function runBench(seconds){
   try{
     stx.textContent="Checking WebGPU…";
     // Re-create the engine for the chosen window size so the benchmark tunes W.
-    const wSel=Math.max(1, parseInt(($("bench-w")&&$("bench-w").value)||"64")||64);
-    if(window.WebGPUSearch && (!gpuEngine || gpuEngine.W!==wSel)) gpuEngine = new window.WebGPUSearch(wSel);
+    const wSel=Math.max(1, parseInt(($("bench-w")&&$("bench-w").value)||"96")||96);
+    const wgSel=Math.max(1, parseInt(($("bench-wg")&&$("bench-wg").value)||"64")||64);
+    if(window.WebGPUSearch && (!gpuEngine || gpuEngine.W!==wSel || gpuEngine.WG!==wgSel)) gpuEngine = new window.WebGPUSearch(wSel, wgSel);
     const gok=await ensureGpu();
-    // Only remember a window the self-test actually PASSED, so a device that
-    // rejects a too-large W never becomes the saved default (which would make
+    // Only remember a config the self-test actually PASSED, so a device that
+    // rejects a too-large W/WG never becomes the saved default (which would make
     // the real search fail and fall back to CPU).
-    if(gok){ try{ localStorage.setItem("ludkey.gpuW", String(wSel)); }catch(_){} }
+    if(gok){ try{ localStorage.setItem("ludkey.gpuW", String(wSel)); localStorage.setItem("ludkey.gpuWG", String(wgSel)); }catch(_){} }
     const rows=[];
     rows.push(["WebGPU self-test", gok? ("PASS — "+((gpuEngine.adapterInfo&&(gpuEngine.adapterInfo.architecture||gpuEngine.adapterInfo.vendor))||"gpu")) : ("FAIL / unavailable — "+(gpuReason||"no WebGPU"))]);
-    if(gpuEngine){ rows.push(["Window (keys/thread)", String(gpuEngine.W)]);
+    if(gpuEngine){ rows.push(["Config", "W="+gpuEngine.W+" · workgroup="+gpuEngine.WG]);
       const L=gpuEngine.device&&gpuEngine.device.limits;
       if(L){ rows.push(["maxComputeWorkgroupsPerDim", String(L.maxComputeWorkgroupsPerDimension)]); rows.push(["maxStorageBufferBinding", (L.maxStorageBufferBindingSize>>20)+" MiB"]); rows.push(["maxComputeInvocations/wg", String(L.maxComputeInvocationsPerWorkgroup)]); }
     }
@@ -2340,35 +2342,47 @@ async function runBench(seconds){
   finally{ benchBusy=false; }
 }
 
-// Auto-tune: try a ladder of window sizes, skip the ones the device rejects,
-// keep the fastest that passed as the default W (ТЗ 5.7 — tuned by measurement).
+// Auto-tune: sweep a matrix of window size W and workgroup size WG, skip the
+// configs the device rejects, and keep the fastest that passed (ТЗ Этап 5/6 —
+// tuned by measurement on the physical GPU, not a fixed guess). Two phases keep
+// the run short: find the best W at WG=64, then sweep WG for that W.
+async function measureConfig(W, WG, seconds, rows, out){
+  let eng; try{ eng=new window.WebGPUSearch(W, WG); const st=await eng.init(); if(!st.ok){ rows.push(["W="+W+" · WG="+WG, "rejected ("+((st.reason||"").slice(0,36))+")"]); kvRows(out,rows); return {kps:0}; } }
+  catch(e){ rows.push(["W="+W+" · WG="+WG, "rejected ("+((e.message||"").slice(0,36))+")"]); kvRows(out,rows); return {kps:0}; }
+  const saveEng=gpuEngine; gpuEngine=eng; const r=await runGpuBench(seconds); gpuEngine=saveEng;
+  const kps=r.err?0:r.kps;
+  rows.push(["W="+W+" · WG="+WG, r.err?("error: "+r.err):(fmtSpeed(kps)+"  · peak "+fmtSpeed(r.peak))]);
+  kvRows(out,rows); return {kps, peak:r.peak};
+}
 async function autoTuneW(seconds){
   if(benchBusy) return;
   if(running){ $("bench-status").textContent="Stop the search first."; return; }
   if(!window.WebGPUSearch){ $("bench-status").textContent="WebGPU not available."; return; }
   benchBusy=true;
-  const out=$("bench-out"), stx=$("bench-status");
-  const ladder=[16,32,64,96,128,192,256]; const rows=[]; let best=null, bestKps=0;
+  const out=$("bench-out"), stx=$("bench-status"); const rows=[];
   try{
-    for(const W of ladder){
-      stx.textContent="Testing W="+W+"…";
-      let eng; try{ eng=new window.WebGPUSearch(W); const st=await eng.init(); if(!st.ok){ rows.push(["W="+W, "rejected ("+((st.reason||"").slice(0,40))+")"]); kvRows(out,rows); continue; } }
-      catch(e){ rows.push(["W="+W, "rejected ("+((e.message||"").slice(0,40))+")"]); kvRows(out,rows); continue; }
-      const saveEng=gpuEngine; gpuEngine=eng;                 // runGpuBench uses gpuEngine
-      const r=await runGpuBench(seconds); gpuEngine=saveEng;
-      const kps=r.err?0:r.kps;
-      rows.push(["W="+W, r.err?("error: "+r.err):(fmtSpeed(kps)+"  · peak "+fmtSpeed(r.peak))]);
-      kvRows(out,rows);
-      if(kps>bestKps){ bestKps=kps; best=W; }
+    // Phase 1: best W at WG=64
+    let bestW=null, bestWkps=0;
+    for(const W of [16,32,64,96,128,192,256]){
+      stx.textContent="Phase 1 — W="+W+" (WG=64)…";
+      const r=await measureConfig(W, 64, seconds, rows, out);
+      if(r.kps>bestWkps){ bestWkps=r.kps; bestW=W; }
     }
-    if(best){
-      try{ localStorage.setItem("ludkey.gpuW", String(best)); }catch(_){}
-      gpuEngine = new window.WebGPUSearch(best); await ensureGpu();
-      if($("bench-w")) $("bench-w").value=String(best);
-      rows.push(["Best window", "W="+best+"  ·  "+fmtSpeed(bestKps)+"  (saved — the real GPU search now uses it)"]);
-      kvRows(out,rows); stx.textContent="Done — best W="+best+" saved.";
-      logEvent("good","GPU auto-tune: best window W="+best+" ("+fmtSpeed(bestKps)+")");
-    } else { stx.textContent="No GPU window passed — using CPU."; }
+    if(!bestW){ stx.textContent="No GPU config passed — using CPU."; benchBusy=false; return; }
+    // Phase 2: sweep WG for the best W
+    let bestWG=64, bestKps=bestWkps;
+    for(const WG of [32,128,256]){
+      stx.textContent="Phase 2 — W="+bestW+" · WG="+WG+"…";
+      const r=await measureConfig(bestW, WG, seconds, rows, out);
+      if(r.kps>bestKps){ bestKps=r.kps; bestWG=WG; }
+    }
+    try{ localStorage.setItem("ludkey.gpuW", String(bestW)); localStorage.setItem("ludkey.gpuWG", String(bestWG)); }catch(_){}
+    gpuEngine = new window.WebGPUSearch(bestW, bestWG); await ensureGpu();
+    if($("bench-w")) $("bench-w").value=String(bestW);
+    if($("bench-wg")) $("bench-wg").value=String(bestWG);
+    rows.push(["Best config", "W="+bestW+" · WG="+bestWG+"  ·  "+fmtSpeed(bestKps)+"  (saved — the real GPU search uses it)"]);
+    kvRows(out,rows); stx.textContent="Done — W="+bestW+", WG="+bestWG+" saved.";
+    logEvent("good","GPU auto-tune: W="+bestW+", WG="+bestWG+" ("+fmtSpeed(bestKps)+")");
   }catch(e){ stx.textContent="Auto-tune error: "+(e&&e.message||e); }
   finally{ benchBusy=false; }
 }
@@ -2553,7 +2567,7 @@ $("coveredText").textContent = "Covered: "+doneChunks.size.toLocaleString()+" se
 renderHistory(); detectGPU(); runSelfTest(); updateFeasNote(0);
 $("mode").dispatchEvent(new Event("change")); // reflect default (collaborative) mode in the UI
 try{ wireTools(); }catch(_){}
-try{ $("bench-quick").addEventListener("click", ()=>runBench(6)); $("bench-long").addEventListener("click", ()=>runBench(60)); $("bench-auto").addEventListener("click", ()=>autoTuneW(4)); if($("bench-w")) $("bench-w").value=String(gpuW()); }catch(_){}
+try{ $("bench-quick").addEventListener("click", ()=>runBench(6)); $("bench-long").addEventListener("click", ()=>runBench(60)); $("bench-auto").addEventListener("click", ()=>autoTuneW(4)); if($("bench-w")) $("bench-w").value=String(gpuW()); if($("bench-wg")) $("bench-wg").value=String(gpuWG()); }catch(_){}
 const startHash=location.hash.slice(1); if(titles[startHash]) switchView(startHash);
 requestAnimationFrame(render);
 logEvent("info","LudKey Hunter ready — CPU engine, "+(navigator.hardwareConcurrency||"?")+" threads available");
