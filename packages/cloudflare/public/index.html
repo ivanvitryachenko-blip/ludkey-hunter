@@ -351,6 +351,7 @@
               </div>
               <div class="grid pair2" style="grid-template-columns:1fr 1fr; gap:10px;">
                 <label class="field">Workers (threads)<input type="number" id="workers" min="1" max="30" value="2"></label>
+                <span class="hint" id="workers-hint"></span>
                 <label class="field">Window size<input type="number" id="window" min="64" max="8192" step="64" value="1024"></label>
               </div>
               <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
@@ -1355,7 +1356,10 @@ function connScanSegmentGpu(entry, s, e, target){
       if(!running){ resolve({stopped:true}); return; }
       const dt = (performance.now()-t0)/1000;
       segScanned += n; entry.cursor += BigInt(n); entry.scanned = entry.base + segScanned; entry.speed = dt>0 ? n/dt : 0;
-      if(dt < 0.15) BATCH = Math.min(1<<20, BATCH*2); else if(dt > 0.5) BATCH = Math.max(256, (BATCH/2)|0);
+      // Floor at 32768: the wall-clock dt includes main-thread latency (heavy in
+    // hybrid mode with many CPU workers), so a 256 floor would collapse the GPU
+    // to useless tiny dispatches and look "stuck". 32768 keeps real GPU progress.
+    if(dt < 0.2) BATCH = Math.min(1<<20, BATCH*2); else if(dt > 0.75) BATCH = Math.max(1<<15, (BATCH/2)|0);
       if(res.found){ const h160 = ecHash160Compressed(res.key); resolve({found:true, key:"0x"+res.key.toString(16), h160}); return; }
       await sleep(0);
     }
@@ -1569,7 +1573,10 @@ async function gpuLoop(entry, targetBytes, hybrid){
     if(!running) return; // stopped mid-batch
     const dt = (performance.now()-t0)/1000;
     entry.scanned += n; entry.cursor += BigInt(n); entry.speed = dt>0 ? n/dt : 0;
-    if(dt < 0.15) BATCH = Math.min(1<<20, BATCH*2); else if(dt > 0.5) BATCH = Math.max(256, (BATCH/2)|0);
+    // Floor at 32768: the wall-clock dt includes main-thread latency (heavy in
+    // hybrid mode with many CPU workers), so a 256 floor would collapse the GPU
+    // to useless tiny dispatches and look "stuck". 32768 keeps real GPU progress.
+    if(dt < 0.2) BATCH = Math.min(1<<20, BATCH*2); else if(dt > 0.75) BATCH = Math.max(1<<15, (BATCH/2)|0);
     if(res.found){
       const h160 = ecHash160Compressed(res.key); const addr = b58check(h160); matches++;
       logEvent("hit","*** MATCH (GPU) — key 0x"+res.key.toString(16)+" → "+addr+" ***");
@@ -1611,7 +1618,10 @@ async function tryStartHybridSequential(start, end, target, isDemo){
 }
 async function tryStartHybridRandom(){
   if(!await ensureGpu()) return false; // caller falls back to CPU random
-  const workers = Math.max(1, Math.min(32, parseInt($("workers").value)||2));
+  // Leave the main thread / a core free for the GPU dispatch loop: oversubscribing
+  // CPU workers (e.g. 19 on a 6-core phone) starves the GPU and it appears stuck.
+  const hw = Math.max(2, navigator.hardwareConcurrency || 4);
+  const workers = Math.max(1, Math.min(parseInt($("workers").value)||2, hw - 1));
   const windowSize = Math.max(64, Math.min(8192, parseInt($("window").value)||1024));
   const compressed = $("compressed").checked;
   backendLabel = "Hybrid (CPU+GPU)";
@@ -1669,7 +1679,10 @@ async function gpuRandomLoop(entry, targetBytes){
     entry.cursor += BigInt(n);
     entry.scanned = (entry.base||0) + Number(entry.cursor - entry.subStart);
     entry.speed = dt>0 ? n/dt : 0;
-    if(dt < 0.15) BATCH = Math.min(1<<20, BATCH*2); else if(dt > 0.5) BATCH = Math.max(256, (BATCH/2)|0);
+    // Floor at 32768: the wall-clock dt includes main-thread latency (heavy in
+    // hybrid mode with many CPU workers), so a 256 floor would collapse the GPU
+    // to useless tiny dispatches and look "stuck". 32768 keeps real GPU progress.
+    if(dt < 0.2) BATCH = Math.min(1<<20, BATCH*2); else if(dt > 0.75) BATCH = Math.max(1<<15, (BATCH/2)|0);
     if(res.found){
       const h160 = ecHash160Compressed(res.key); const addr = b58check(h160); matches++;
       logEvent("hit","*** MATCH (GPU) — key 0x"+res.key.toString(16)+" → "+addr+" ***");
@@ -2514,6 +2527,18 @@ document.addEventListener("visibilitychange", ()=>{
 $("btn-stop").addEventListener("click", ()=>stopAll("stopped by user"));
 $("btn-reset").addEventListener("click", resetSearch);
 $("btn-save").addEventListener("click", ()=>{ if(this_sessionMeta){ saveSession("saved checkpoint"); logEvent("info","Session saved to history"); } else logEvent("warn","Nothing running to save"); });
+// Clarify what the Workers field means per backend: the GPU is ONE dispatch
+// engine (the field doesn't apply), CPU/hybrid use N Web Worker threads.
+function updateWorkersHint(){
+  const be = $("backend") ? $("backend").value : "cpu";
+  const wf = $("workers"), h = $("workers-hint"); if(!h) return;
+  if(be==="gpu"){ if(wf) wf.disabled=true; h.textContent="GPU is a single parallel engine — the Workers field is ignored in GPU mode."; }
+  else if(be==="hybrid"){ if(wf) wf.disabled=false; const hw=Math.max(2,navigator.hardwareConcurrency||4); h.textContent="CPU worker threads that run alongside the GPU (capped to "+(hw-1)+" on this device so the GPU isn't starved)."; }
+  else if(be==="auto"){ if(wf) wf.disabled=false; h.textContent="Used only if Auto falls back to CPU (GPU mode ignores it)."; }
+  else { if(wf) wf.disabled=false; h.textContent="Parallel CPU Web Worker threads (1 per core is a good start)."; }
+}
+if($("backend")) $("backend").addEventListener("change", updateWorkersHint);
+updateWorkersHint();
 $("mode").addEventListener("change", ()=>{ const m=$("mode").value; const demo=m==="demo", rnd=m==="random", conn=m==="connected", shr=m==="shared";
   $("rstart").disabled = demo||rnd||conn||shr; $("rend").disabled = demo||rnd||conn||shr;
   $("randomBox").hidden = !rnd;
