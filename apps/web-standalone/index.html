@@ -457,6 +457,7 @@
           <div class="controls" style="margin:8px 0; flex-wrap:wrap; align-items:center; gap:10px;">
             <button class="btn" id="bench-quick" type="button">▶ Quick (6s each)</button>
             <button class="btn ghost" id="bench-long" type="button">▶ Full (60s each)</button>
+            <button class="btn" id="bench-auto" type="button">⚙ Auto-tune W</button>
             <label class="field" style="margin:0;">GPU window W<select id="bench-w"><option value="8">8</option><option value="16">16</option><option value="32">32</option><option value="64" selected>64</option><option value="96">96</option><option value="128">128</option><option value="192">192</option><option value="256">256</option></select></label>
             <span class="hint" id="bench-status"></span>
           </div>
@@ -2313,9 +2314,12 @@ async function runBench(seconds){
     stx.textContent="Checking WebGPU…";
     // Re-create the engine for the chosen window size so the benchmark tunes W.
     const wSel=Math.max(1, parseInt(($("bench-w")&&$("bench-w").value)||"64")||64);
-    try{ localStorage.setItem("ludkey.gpuW", String(wSel)); }catch(_){} // the real GPU search uses this W too
     if(window.WebGPUSearch && (!gpuEngine || gpuEngine.W!==wSel)) gpuEngine = new window.WebGPUSearch(wSel);
     const gok=await ensureGpu();
+    // Only remember a window the self-test actually PASSED, so a device that
+    // rejects a too-large W never becomes the saved default (which would make
+    // the real search fail and fall back to CPU).
+    if(gok){ try{ localStorage.setItem("ludkey.gpuW", String(wSel)); }catch(_){} }
     const rows=[];
     rows.push(["WebGPU self-test", gok? ("PASS — "+((gpuEngine.adapterInfo&&(gpuEngine.adapterInfo.architecture||gpuEngine.adapterInfo.vendor))||"gpu")) : ("FAIL / unavailable — "+(gpuReason||"no WebGPU"))]);
     if(gpuEngine){ rows.push(["Window (keys/thread)", String(gpuEngine.W)]);
@@ -2333,6 +2337,39 @@ async function runBench(seconds){
     kvRows(out, rows);
     stx.textContent="Done. (measured on this device)";
   }catch(e){ stx.textContent="Benchmark error: "+(e&&e.message||e); }
+  finally{ benchBusy=false; }
+}
+
+// Auto-tune: try a ladder of window sizes, skip the ones the device rejects,
+// keep the fastest that passed as the default W (ТЗ 5.7 — tuned by measurement).
+async function autoTuneW(seconds){
+  if(benchBusy) return;
+  if(running){ $("bench-status").textContent="Stop the search first."; return; }
+  if(!window.WebGPUSearch){ $("bench-status").textContent="WebGPU not available."; return; }
+  benchBusy=true;
+  const out=$("bench-out"), stx=$("bench-status");
+  const ladder=[16,32,64,96,128,192,256]; const rows=[]; let best=null, bestKps=0;
+  try{
+    for(const W of ladder){
+      stx.textContent="Testing W="+W+"…";
+      let eng; try{ eng=new window.WebGPUSearch(W); const st=await eng.init(); if(!st.ok){ rows.push(["W="+W, "rejected ("+((st.reason||"").slice(0,40))+")"]); kvRows(out,rows); continue; } }
+      catch(e){ rows.push(["W="+W, "rejected ("+((e.message||"").slice(0,40))+")"]); kvRows(out,rows); continue; }
+      const saveEng=gpuEngine; gpuEngine=eng;                 // runGpuBench uses gpuEngine
+      const r=await runGpuBench(seconds); gpuEngine=saveEng;
+      const kps=r.err?0:r.kps;
+      rows.push(["W="+W, r.err?("error: "+r.err):(fmtSpeed(kps)+"  · peak "+fmtSpeed(r.peak))]);
+      kvRows(out,rows);
+      if(kps>bestKps){ bestKps=kps; best=W; }
+    }
+    if(best){
+      try{ localStorage.setItem("ludkey.gpuW", String(best)); }catch(_){}
+      gpuEngine = new window.WebGPUSearch(best); await ensureGpu();
+      if($("bench-w")) $("bench-w").value=String(best);
+      rows.push(["Best window", "W="+best+"  ·  "+fmtSpeed(bestKps)+"  (saved — the real GPU search now uses it)"]);
+      kvRows(out,rows); stx.textContent="Done — best W="+best+" saved.";
+      logEvent("good","GPU auto-tune: best window W="+best+" ("+fmtSpeed(bestKps)+")");
+    } else { stx.textContent="No GPU window passed — using CPU."; }
+  }catch(e){ stx.textContent="Auto-tune error: "+(e&&e.message||e); }
   finally{ benchBusy=false; }
 }
 
@@ -2516,7 +2553,7 @@ $("coveredText").textContent = "Covered: "+doneChunks.size.toLocaleString()+" se
 renderHistory(); detectGPU(); runSelfTest(); updateFeasNote(0);
 $("mode").dispatchEvent(new Event("change")); // reflect default (collaborative) mode in the UI
 try{ wireTools(); }catch(_){}
-try{ $("bench-quick").addEventListener("click", ()=>runBench(6)); $("bench-long").addEventListener("click", ()=>runBench(60)); if($("bench-w")) $("bench-w").value=String(gpuW()); }catch(_){}
+try{ $("bench-quick").addEventListener("click", ()=>runBench(6)); $("bench-long").addEventListener("click", ()=>runBench(60)); $("bench-auto").addEventListener("click", ()=>autoTuneW(4)); if($("bench-w")) $("bench-w").value=String(gpuW()); }catch(_){}
 const startHash=location.hash.slice(1); if(titles[startHash]) switchView(startHash);
 requestAnimationFrame(render);
 logEvent("info","LudKey Hunter ready — CPU engine, "+(navigator.hardwareConcurrency||"?")+" threads available");
