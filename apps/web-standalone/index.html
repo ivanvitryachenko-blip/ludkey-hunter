@@ -1112,30 +1112,37 @@ class WebGPUSearch {
   }
 
   // One batch: test keys base..base+count-1 against targetBytes(20). Returns {found, key} or {found:false}.
+  // Buffers, bind group and the params array are created ONCE and reused across
+  // every dispatch (Stage 7 — no per-dispatch allocation or teardown).
   async searchBatch(baseKey, targetBytes, count) {
-    const params = new Uint32Array(22);
+    if (!this.pbuf) {
+      this.pbuf = this.device.createBuffer({ size: 22 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      this.rbuf = this.device.createBuffer({ size: 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+      this.readbuf = this.device.createBuffer({ size: 12, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      this.bind = this.device.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: { buffer: this.pbuf } }, { binding: 1, resource: { buffer: this.rbuf } }, { binding: 2, resource: { buffer: this.gtableBuf } }, { binding: 3, resource: { buffer: this.deltaBuf } }] });
+      this._params = new Uint32Array(22);
+      this._zero3 = new Uint32Array([0, 0, 0]);
+    }
+    const params = this._params;
     params.set(keyToLimbs(baseKey), 0);
     params.set(h160ToWords(targetBytes), 16);
     params[21] = count >>> 0;
-    const pbuf = this.device.createBuffer({ size: params.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    this.device.queue.writeBuffer(pbuf, 0, params);
-    const rbuf = this.device.createBuffer({ size: 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-    this.device.queue.writeBuffer(rbuf, 0, new Uint32Array([0, 0, 0]));
-    const read = this.device.createBuffer({ size: 12, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-    const bind = this.device.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: { buffer: pbuf } }, { binding: 1, resource: { buffer: rbuf } }, { binding: 2, resource: { buffer: this.gtableBuf } }, { binding: 3, resource: { buffer: this.deltaBuf } }] });
+    this.device.queue.writeBuffer(this.pbuf, 0, params);
+    this.device.queue.writeBuffer(this.rbuf, 0, this._zero3); // reset the match flag
     const enc = this.device.createCommandEncoder();
     const pass = enc.beginComputePass();
-    pass.setPipeline(this.pipeline); pass.setBindGroup(0, bind);
+    pass.setPipeline(this.pipeline); pass.setBindGroup(0, this.bind);
     // Each thread handles W keys; workgroups of WG threads.
     pass.dispatchWorkgroups(Math.max(1, Math.ceil(count / (this.W * this.WG))));
     pass.end();
-    enc.copyBufferToBuffer(rbuf, 0, read, 0, 12);
+    enc.copyBufferToBuffer(this.rbuf, 0, this.readbuf, 0, 12);
+    const t0 = performance.now();
     this.device.queue.submit([enc.finish()]);
-    await read.mapAsync(GPUMapMode.READ);
-    const out = new Uint32Array(read.getMappedRange().slice(0));
-    read.unmap();
-    pbuf.destroy(); rbuf.destroy(); read.destroy();
+    await this.readbuf.mapAsync(GPUMapMode.READ);
+    this.lastDispatchMs = performance.now() - t0; // wall-clock dispatch time (iOS has no GPU timestamps)
+    const out = new Uint32Array(this.readbuf.getMappedRange().slice(0));
+    this.readbuf.unmap();
     if (out[0] === 1) return { found: true, key: baseKey + BigInt(out[1] >>> 0) };
     return { found: false };
   }
