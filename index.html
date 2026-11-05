@@ -472,6 +472,18 @@
             <p class="hint" style="margin-top:10px;">Browsers deliberately hide GPU temperature, utilization and VRAM. Those readings are only available from the native Desktop Agent (NVML / nvidia-smi). This panel will never show invented numbers.</p>
           </div>
         </div>
+        <div class="panel" id="gpu-bench">
+          <h3>Benchmark — CPU vs GPU (measured on this device)</h3>
+          <p class="hint">Runs the WebGPU self-test, then measures real key throughput for each engine on the same #72 range. Every number here is measured on your device — never invented. GPU speed depends entirely on your hardware and Safari's Metal backend.</p>
+          <div class="controls" style="margin:8px 0; flex-wrap:wrap; align-items:center; gap:10px;">
+            <button class="btn" id="bench-quick" type="button">▶ Quick (6s each)</button>
+            <button class="btn ghost" id="bench-long" type="button">▶ Full (60s each)</button>
+            <label class="field" style="margin:0;">GPU window W<select id="bench-w"><option value="8">8</option><option value="16" selected>16</option><option value="32">32</option><option value="64">64</option></select></label>
+            <span class="hint" id="bench-status"></span>
+          </div>
+          <p class="hint">Try several W values and keep the fastest on your device — larger W means one field inversion amortised over more keys, but more GPU memory per thread. The best W is device-specific (that's why it's measured, not fixed).</p>
+          <dl class="kv" id="bench-out"><dt>Not run yet</dt><dd>—</dd></dl>
+        </div>
         <div class="panel"><h3>Throughput (live)</h3><canvas id="chart-gpu" width="1000" height="150"></canvas></div>
       </section>
 
@@ -1087,6 +1099,9 @@ class WebGPUSearch {
     catch (e) { return { ok: false, reason: "requestAdapter failed: " + e.message }; }
     if (!adapter) return { ok: false, reason: "no GPU adapter" };
     this.device = await adapter.requestDevice();
+    // If the GPU device is lost (backgrounding, driver reset, thermal), mark the
+    // engine not-ok so the next search re-initialises or falls back to CPU.
+    try { this.device.lost.then((info) => { this.ok = false; this.pipeline = null; this.lostReason = (info && info.reason) || "device lost"; }); } catch (_) {}
     try {
       const module = this.device.createShaderModule({ code: buildSearchWGSL(this.W) });
       // surface compile errors early
@@ -2280,6 +2295,63 @@ function wireTools(){
   $("tl-range-idx").addEventListener("input", toolsRange);
   toolsTime(); toolsProgress(); toolsRange(); toolsSegTable(); toolsDevTable();
 }
+// ---- Benchmark: measured CPU vs GPU throughput on this device (no fake numbers) ----
+let benchBusy=false;
+async function runGpuBench(seconds){
+  const g=gpuEngine; const target=hexToBytes(PUZZLE.h160); // real target: never matches in a short run
+  let base=PUZZLE.start+1234567n, scanned=0, peak=0, BATCH=8192;
+  const t0=performance.now();
+  while((performance.now()-t0)/1000 < seconds){
+    const d0=performance.now();
+    let res; try{ res=await g.searchBatch(base, target, BATCH); }catch(e){ return {err:e.message}; }
+    const dt=(performance.now()-d0)/1000; scanned+=BATCH; base+=BigInt(BATCH);
+    const kps= dt>0?BATCH/dt:0; if(kps>peak) peak=kps;
+    if(dt<0.15) BATCH=Math.min(1<<20,BATCH*2); else if(dt>0.5) BATCH=Math.max(256,(BATCH/2)|0);
+    if(res && res.found) break; // astronomically unlikely, but stop honestly
+    await sleep(0);
+  }
+  return { kps: scanned/((performance.now()-t0)/1000), peak, scanned };
+}
+function runCpuBench(seconds){
+  return new Promise(resolve=>{
+    const w=new Worker(workerBlobUrl); let last=0;
+    w.onmessage=(e)=>{ const m=e.data; if(m&&m.type==="progress") last=m.scanned; };
+    const s=PUZZLE.start+7654321n, e=s+(1n<<40n);
+    w.postMessage({type:"start", id:0, start:"0x"+s.toString(16), end:"0x"+e.toString(16), target:PUZZLE.h160, windowSize:1024, compressed:true});
+    setTimeout(()=>{ try{w.postMessage({type:"stop"});}catch(_){ } try{w.terminate();}catch(_){ } resolve({ kps: last/seconds, scanned:last }); }, seconds*1000);
+  });
+}
+async function runBench(seconds){
+  if(benchBusy) return;
+  if(running){ $("bench-status").textContent="Stop the search first."; return; }
+  benchBusy=true;
+  const out=$("bench-out"), stx=$("bench-status");
+  try{
+    stx.textContent="Checking WebGPU…";
+    // Re-create the engine for the chosen window size so the benchmark tunes W.
+    const wSel=Math.max(1, parseInt(($("bench-w")&&$("bench-w").value)||"16")||16);
+    if(window.WebGPUSearch && (!gpuEngine || gpuEngine.W!==wSel)) gpuEngine = new window.WebGPUSearch(wSel);
+    const gok=await ensureGpu();
+    const rows=[];
+    rows.push(["WebGPU self-test", gok? ("PASS — "+((gpuEngine.adapterInfo&&(gpuEngine.adapterInfo.architecture||gpuEngine.adapterInfo.vendor))||"gpu")) : ("FAIL / unavailable — "+(gpuReason||"no WebGPU"))]);
+    if(gpuEngine){ rows.push(["Window (keys/thread)", String(gpuEngine.W)]);
+      const L=gpuEngine.device&&gpuEngine.device.limits;
+      if(L){ rows.push(["maxComputeWorkgroupsPerDim", String(L.maxComputeWorkgroupsPerDimension)]); rows.push(["maxStorageBufferBinding", (L.maxStorageBufferBindingSize>>20)+" MiB"]); rows.push(["maxComputeInvocations/wg", String(L.maxComputeInvocationsPerWorkgroup)]); }
+    }
+    kvRows(out, rows);
+    stx.textContent="Measuring CPU (1 core)…";
+    const cpu=await runCpuBench(seconds);
+    let gpu={err:"GPU unavailable"};
+    if(gok){ stx.textContent="Measuring GPU…"; gpu=await runGpuBench(seconds); }
+    rows.push(["CPU (Web Worker, 1 core)", fmtSpeed(cpu.kps)]);
+    if(gpu.err) rows.push(["GPU", "error: "+gpu.err]);
+    else{ rows.push(["GPU (WebGPU, windowed)", fmtSpeed(gpu.kps)+"  ·  peak "+fmtSpeed(gpu.peak)]); rows.push(["GPU / CPU ratio", cpu.kps>0?((gpu.kps/cpu.kps).toFixed(2)+"×"):"—"]); }
+    kvRows(out, rows);
+    stx.textContent="Done. (measured on this device)";
+  }catch(e){ stx.textContent="Benchmark error: "+(e&&e.message||e); }
+  finally{ benchBusy=false; }
+}
+
 // keep the live pages fresh without touching the compute hot path (1s, visible-only)
 setInterval(()=>{ try{ renderPuzzle(); renderTools(); }catch(_){} }, 1000);
 
@@ -2328,6 +2400,13 @@ function runSelfTest(){
 $("btn-start").addEventListener("click", startSearch);
 $("btn-pause").addEventListener("click", pauseAll);
 $("btn-resume").addEventListener("click", resumeAll);
+// Auto-pause when the tab is backgrounded (iOS Safari suspends GPU work anyway);
+// auto-resume on return, but only if we were the one who paused.
+let bgAutoPaused=false;
+document.addEventListener("visibilitychange", ()=>{
+  if(document.hidden){ if(running && !paused){ bgAutoPaused=true; pauseAll(); } }
+  else if(bgAutoPaused){ bgAutoPaused=false; if(running && paused) resumeAll(); }
+});
 $("btn-stop").addEventListener("click", ()=>stopAll("stopped by user"));
 $("btn-reset").addEventListener("click", resetSearch);
 $("btn-save").addEventListener("click", ()=>{ if(this_sessionMeta){ saveSession("saved checkpoint"); logEvent("info","Session saved to history"); } else logEvent("warn","Nothing running to save"); });
@@ -2453,6 +2532,7 @@ $("coveredText").textContent = "Covered: "+doneChunks.size.toLocaleString()+" se
 renderHistory(); detectGPU(); runSelfTest(); updateFeasNote(0);
 $("mode").dispatchEvent(new Event("change")); // reflect default (collaborative) mode in the UI
 try{ wireTools(); }catch(_){}
+try{ $("bench-quick").addEventListener("click", ()=>runBench(6)); $("bench-long").addEventListener("click", ()=>runBench(60)); }catch(_){}
 const startHash=location.hash.slice(1); if(titles[startHash]) switchView(startHash);
 requestAnimationFrame(render);
 logEvent("info","LudKey Hunter ready — CPU engine, "+(navigator.hardwareConcurrency||"?")+" threads available");
