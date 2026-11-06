@@ -670,7 +670,7 @@ func main() {
 		}
 		online := 0
 		tick := 0
-		const netEvery = 10 // 10 × 2s = ~20s between coordinator calls
+		const netEvery = 30 // 30 × 2s = ~60s between coordinator calls (realtime not needed; fewer free-tier requests)
 		for !stop.Load() {
 			time.Sleep(2 * time.Second)
 			tick++
