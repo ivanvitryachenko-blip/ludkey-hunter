@@ -1015,11 +1015,13 @@ func runGpuPool(server, payout, api, gpuExe string) {
 	// Local progress: everything searched here (this session or earlier), plus a
 	// "pending" list of indices not yet confirmed into the pool.
 	done := loadDoneIdx(gpuProgressFile, "ludkey-progress.txt")
-	pending := make([]uint64, 0, len(done))
-	for k := range done {
-		pending = append(pending, k)
-	}
-	fmt.Printf("Loaded %d done segments from local progress.\n", len(done))
+	// The local file is the durable journal of searched segments. The coordinator
+	// stores its done-set in one 128 KiB Durable Object value (~7000 indices), so
+	// we do NOT bulk-upload history — random 2^25 assignment in a 2^46 space
+	// collides with probability ~1e-9, so the pool needn't remember it anyway.
+	// Only work done OFFLINE is queued here for a best-effort upload on reconnect.
+	pending := []uint64{}
+	fmt.Printf("Loaded %d done segments from local progress (local file is the durable journal; used to skip them offline).\n", len(done))
 
 	connectAndSync := func() bool {
 		var ri struct {
