@@ -158,6 +158,23 @@ class RangeAllocator {
     return true;
   }
 
+  // Batch lease: hand out up to `count` free segments in one call (same 2^25
+  // grid, just fewer round-trips). Lets a fast GPU client stay inside the
+  // free-tier request budget — one request per hundreds of segments.
+  leaseBatch(deviceId, count, now = Date.now()) {
+    const n = Math.max(1, Math.min(Number(count) || 1, 1024));
+    const out = [];
+    for (let i = 0; i < n; i++) { const c = this.lease(deviceId, now); if (!c) break; out.push(c); }
+    return out;
+  }
+
+  // Batch complete: mark several leased segments done in one call.
+  completeBatch(indices, deviceId) {
+    let ok = 0;
+    for (const idx of indices) if (this.complete(idx, deviceId)) ok++;
+    return ok;
+  }
+
   reclaimExpired(now = Date.now()) {
     let n = 0;
     for (const [key, l] of this.active) {
@@ -327,10 +344,17 @@ export class Coordinator {
       dev.lastSeen = Date.now();
 
       if (path === "/api/lease" && method === "POST") {
+        const b = await body(req).catch(() => ({}));
+        const fmtChunk = (c) => ({ index: c.index.toString(), start: "0x" + c.start.toString(16), end: "0x" + c.end.toString(16) });
+        if (b && b.count !== undefined) {
+          const list = this.allocator.leaseBatch(dev.id, b.count);
+          await this.persist();
+          return json({ chunks: list.map(fmtChunk) });
+        }
         const c = this.allocator.lease(dev.id);
         await this.persist();
         if (!c) return json({ chunk: null, message: "range fully assigned or done" });
-        return json({ chunk: { index: c.index.toString(), start: "0x" + c.start.toString(16), end: "0x" + c.end.toString(16) } });
+        return json({ chunk: fmtChunk(c) });
       }
       if (path === "/api/heartbeat" && method === "POST") {
         const b = await body(req);
@@ -345,6 +369,12 @@ export class Coordinator {
       }
       if (path === "/api/complete" && method === "POST") {
         const b = await body(req);
+        if (Array.isArray(b.chunkIndices)) {
+          const idxs = [];
+          for (const ci of b.chunkIndices.slice(0, 1024)) { const idx = parseChunkIndex(ci, this.allocator.chunkCount); if (idx !== null) idxs.push(idx); }
+          const ok = this.allocator.completeBatch(idxs, dev.id); await this.persist();
+          return json({ ok: ok > 0, completed: ok });
+        }
         const idx = parseChunkIndex(b.chunkIndex, this.allocator.chunkCount);
         if (idx === null) return json({ error: "bad chunkIndex" }, 400);
         const ok = this.allocator.complete(idx, dev.id); await this.persist();

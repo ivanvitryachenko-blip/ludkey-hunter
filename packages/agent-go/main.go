@@ -989,75 +989,102 @@ func runGpuPool(server, payout, api, gpuExe string) {
 	fmt.Println("Pool search started — leasing ranges and searching on the GPU.")
 	startTime := time.Now()
 	var chunks uint64
+	type chunkT struct {
+		Index string `json:"index"`
+		Start string `json:"start"`
+		End   string `json:"end"`
+	}
+	const batchChunks = 256 // one lease + one complete per 256 segments
 	for !stop.Load() {
 		var lease struct {
-			Chunk *struct {
-				Index string `json:"index"`
-				Start string `json:"start"`
-				End   string `json:"end"`
-			} `json:"chunk"`
+			Chunks []chunkT `json:"chunks"`
+			Chunk  *chunkT  `json:"chunk"`
 		}
-		if err := coord.post("/api/lease", map[string]any{}, true, &lease); err != nil {
-			fmt.Println("Lease failed (" + err.Error() + ") — GPU switching to standalone.")
+		if err := coord.post("/api/lease", map[string]any{"count": batchChunks}, true, &lease); err != nil {
+			fmt.Println("\nLease failed (" + err.Error() + ") — GPU switching to standalone.")
 			stdin.Close()
 			cmd.Wait()
 			runGpuStandalone(gpuExe)
 			return
 		}
-		if lease.Chunk == nil {
+		list := lease.Chunks
+		if len(list) == 0 && lease.Chunk != nil { // old coordinator: single chunk
+			list = append(list, *lease.Chunk)
+		}
+		if len(list) == 0 {
 			time.Sleep(2 * time.Second) // nothing free right now
 			continue
 		}
-		start := hexToBig(lease.Chunk.Start)
-		end := hexToBig(lease.Chunk.End)
-		count := new(big.Int).Add(new(big.Int).Sub(end, start), big.NewInt(1))
-		if _, err := io.WriteString(stdin, fmt.Sprintf("%x %s\n", start, count.String())); err != nil {
-			fmt.Println("GPU write failed:", err)
-			break
-		}
-		var resp string
-		for {
-			line, err := br.ReadString('\n')
-			if err != nil {
-				fmt.Println("GPU read failed:", err)
+		completed := make([]string, 0, len(list))
+		foundKey := ""
+		for _, ch := range list {
+			if stop.Load() {
+				break
+			}
+			start := hexToBig(ch.Start)
+			end := hexToBig(ch.End)
+			count := new(big.Int).Add(new(big.Int).Sub(end, start), big.NewInt(1))
+			if _, err := io.WriteString(stdin, fmt.Sprintf("%x %s\n", start, count.String())); err != nil {
+				fmt.Println("\nGPU write failed:", err)
 				stop.Store(true)
 				break
 			}
-			line = strings.TrimSpace(line)
-			if line == "DONE" || strings.HasPrefix(line, "FOUND ") || strings.HasPrefix(line, "ERR") {
-				resp = line
+			var resp string
+			for {
+				line, err := br.ReadString('\n')
+				if err != nil {
+					fmt.Println("\nGPU read failed:", err)
+					stop.Store(true)
+					break
+				}
+				line = strings.TrimSpace(line)
+				if line == "DONE" || strings.HasPrefix(line, "FOUND ") || strings.HasPrefix(line, "ERR") {
+					resp = line
+					break
+				}
+				fmt.Println("[gpu] " + line)
+			}
+			if stop.Load() {
 				break
 			}
-			fmt.Println("[gpu] " + line)
+			if strings.HasPrefix(resp, "FOUND ") {
+				foundKey = strings.TrimSpace(resp[6:])
+				break
+			}
+			if strings.HasPrefix(resp, "ERR") {
+				fmt.Println("\n[gpu] " + resp + " — releasing chunk " + ch.Index)
+				coord.post("/api/release", map[string]any{"chunkIndex": ch.Index}, true, nil)
+				continue
+			}
+			completed = append(completed, ch.Index) // DONE
+			chunks++
+			if c64 := count.Uint64(); c64 > 0 {
+				atomic.AddUint64(&scanned, c64)
+			}
 		}
-		if stop.Load() {
-			break
+		// Report every finished segment of this batch in a single request.
+		if len(completed) > 0 {
+			coord.post("/api/complete", map[string]any{"chunkIndices": completed}, true, nil)
 		}
-		if strings.HasPrefix(resp, "FOUND ") {
-			if key, ok := new(big.Int).SetString(strings.TrimSpace(resp[6:]), 16); ok {
+		if foundKey != "" {
+			if key, ok := new(big.Int).SetString(foundKey, 16); ok {
 				handleMatch(coord, key, target, payout, api, &stop)
 			}
 			stdin.Close()
 			cmd.Wait()
 			return
 		}
-		if strings.HasPrefix(resp, "ERR") {
-			fmt.Println("[gpu] " + resp + " — releasing chunk")
-			coord.post("/api/release", map[string]any{"chunkIndex": lease.Chunk.Index}, true, nil)
-			continue
-		}
-		coord.post("/api/complete", map[string]any{"chunkIndex": lease.Chunk.Index}, true, nil)
-		chunks++
-		if c64 := count.Uint64(); c64 > 0 {
-			atomic.AddUint64(&scanned, c64)
-		}
 		el := time.Since(startTime).Seconds()
 		rate := 0.0
 		if el > 0 {
 			rate = float64(atomic.LoadUint64(&scanned)) / el / 1e6
 		}
+		last := ""
+		if len(list) > 0 {
+			last = list[len(list)-1].Index
+		}
 		fmt.Printf("\r[pool] %s chunks done · %s keys · %.2f Mkey/s · last idx %s        ",
-			commas(chunks), commas(atomic.LoadUint64(&scanned)), rate, lease.Chunk.Index)
+			commas(chunks), commas(atomic.LoadUint64(&scanned)), rate, last)
 	}
 	stdin.Close()
 	cmd.Wait()
