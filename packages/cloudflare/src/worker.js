@@ -175,6 +175,24 @@ class RangeAllocator {
     return ok;
   }
 
+  // Import: mark segments done directly (no prior lease). Used to fold in work a
+  // device did offline or before it joined the pool. Marking a segment done only
+  // means "don't hand it out again" — it never moves funds — so it's safe to
+  // accept from any registered device on this private coordinator.
+  importDone(indices) {
+    let n = 0;
+    for (const idx of indices) {
+      const key = idx.toString();
+      if (this.done.has(key)) continue;
+      this.active.delete(key);
+      this.done.add(key);
+      const c = this.chunkAt(idx);
+      this.doneScanned += c.end - c.start + 1n;
+      n++;
+    }
+    return n;
+  }
+
   reclaimExpired(now = Date.now()) {
     let n = 0;
     for (const [key, l] of this.active) {
@@ -379,6 +397,14 @@ export class Coordinator {
         if (idx === null) return json({ error: "bad chunkIndex" }, 400);
         const ok = this.allocator.complete(idx, dev.id); await this.persist();
         return json({ ok });
+      }
+      if (path === "/api/import" && method === "POST") {
+        const b = await body(req);
+        if (!Array.isArray(b.chunkIndices)) return json({ error: "chunkIndices required" }, 400);
+        const idxs = [];
+        for (const ci of b.chunkIndices.slice(0, 4096)) { const idx = parseChunkIndex(ci, this.allocator.chunkCount); if (idx !== null) idxs.push(idx); }
+        const imported = this.allocator.importDone(idxs); await this.persist();
+        return json({ imported });
       }
       if (path === "/api/release" && method === "POST") {
         const b = await body(req);

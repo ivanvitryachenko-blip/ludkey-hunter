@@ -33,12 +33,14 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -68,7 +70,7 @@ func sub(a, b *big.Int) *big.Int { return md(new(big.Int).Sub(a, b)) }
 func add(a, b *big.Int) *big.Int { return md(new(big.Int).Add(a, b)) }
 func inv(a *big.Int) *big.Int    { return new(big.Int).ModInverse(a, P) }
 
-type Pt struct{ X, Y *big.Int }  // affine
+type Pt struct{ X, Y *big.Int } // affine
 type Jac struct{ X, Y, Z *big.Int }
 
 func jInf() Jac { return Jac{big.NewInt(1), big.NewInt(1), big.NewInt(0)} }
@@ -264,7 +266,7 @@ func rmdF(j int, x, y, z uint32) uint32 {
 func ripemd160(msg []byte) [20]byte {
 	l := len(msg)
 	wo := l + 1
-	k := (56-(wo%64)+64)%64
+	k := (56 - (wo % 64) + 64) % 64
 	total := wo + k + 8
 	b := make([]byte, total)
 	copy(b, msg)
@@ -890,6 +892,114 @@ func runGpuStandalone(gpuExe string) {
 // back DONE / FOUND. The private key never leaves this machine except the final
 // sweep tx to -payout. Falls back to the CUDA binary's own standalone search if
 // the coordinator is unreachable.
+// Local 2^25-segment geometry of puzzle #72 (matches the CUDA standalone grid
+// AND the coordinator's chunk index, so a local index == a pool chunk index).
+var puzzleStartBig = new(big.Int).Lsh(big.NewInt(1), 71) // 2^71
+var segSizeBig = new(big.Int).Lsh(big.NewInt(1), 25)     // 2^25 keys per segment
+const segCount = uint64(1) << 46                         // 2^71 / 2^25 segments
+
+const gpuProgressFile = "ludkey-progress-gpu.txt"
+
+type chunkT struct {
+	Index string `json:"index"`
+	Start string `json:"start"`
+	End   string `json:"end"`
+}
+
+// loadDoneIdx reads decimal segment indices from local progress files.
+func loadDoneIdx(files ...string) map[uint64]bool {
+	m := map[uint64]bool{}
+	for _, f := range files {
+		fh, err := os.Open(f)
+		if err != nil {
+			continue
+		}
+		sc := bufio.NewScanner(fh)
+		sc.Buffer(make([]byte, 64*1024), 1024*1024)
+		for sc.Scan() {
+			line := strings.TrimSpace(sc.Text())
+			if line == "" {
+				continue
+			}
+			if v, err := strconv.ParseUint(line, 10, 64); err == nil {
+				m[v] = true
+			}
+		}
+		fh.Close()
+	}
+	return m
+}
+
+// segStartHex returns the hex start key of segment idx (no 0x), for --serve.
+func segStartHex(idx uint64) string {
+	off := new(big.Int).Mul(new(big.Int).SetUint64(idx), segSizeBig)
+	return fmt.Sprintf("%x", new(big.Int).Add(puzzleStartBig, off))
+}
+
+func pickRandomUndone(done map[uint64]bool) uint64 {
+	for tries := 0; tries < 64; tries++ {
+		idx := rand.Uint64() % segCount
+		if !done[idx] {
+			return idx
+		}
+	}
+	return rand.Uint64() % segCount
+}
+
+// gpuSearchOne sends one range to the --serve child and reads its verdict.
+func gpuSearchOne(stdin io.Writer, br *bufio.Reader, startHex string, count *big.Int) (status, foundKey string) {
+	if _, err := io.WriteString(stdin, fmt.Sprintf("%s %s\n", startHex, count.String())); err != nil {
+		return "DISCONNECT", ""
+	}
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			return "DISCONNECT", ""
+		}
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "DONE":
+			return "DONE", ""
+		case strings.HasPrefix(line, "FOUND "):
+			return "FOUND", strings.TrimSpace(line[6:])
+		case strings.HasPrefix(line, "ERR"):
+			fmt.Println("\n[gpu] " + line)
+			return "ERR", ""
+		default:
+			fmt.Println("[gpu] " + line)
+		}
+	}
+}
+
+// importDoneToCoord marks local-done segments as done in the pool, in batches.
+func importDoneToCoord(coord *Coord, idxs []uint64) (int, bool) {
+	imported := 0
+	const B = 2048
+	for i := 0; i < len(idxs); i += B {
+		j := i + B
+		if j > len(idxs) {
+			j = len(idxs)
+		}
+		arr := make([]string, 0, j-i)
+		for _, v := range idxs[i:j] {
+			arr = append(arr, strconv.FormatUint(v, 10))
+		}
+		var res struct {
+			Imported int `json:"imported"`
+		}
+		if err := coord.post("/api/import", map[string]any{"chunkIndices": arr}, true, &res); err != nil {
+			return imported, false
+		}
+		imported += res.Imported
+	}
+	return imported, true
+}
+
+// runGpuPool: GPU pool worker with offline resilience. It drives a long-running
+// `ludkey_cuda --serve` child. While the coordinator is reachable it leases
+// batches of segments; while it's not, it keeps the GPU busy on random unsearched
+// segments and records them locally, then uploads that offline work (and any
+// pre-existing local progress) to the pool the moment the coordinator returns.
 func runGpuPool(server, payout, api, gpuExe string) {
 	base := strings.TrimRight(server, "/")
 	tr := &http.Transport{
@@ -900,37 +1010,57 @@ func runGpuPool(server, payout, api, gpuExe string) {
 	}
 	coord := &Coord{base: base, client: &http.Client{Timeout: 20 * time.Second, Transport: tr}}
 
-	var info struct {
-		Puzzle  int    `json:"puzzle"`
-		Hash160 string `json:"hash160"`
-		Address string `json:"address"`
-	}
-	var target [20]byte
-	if err := coord.getJSON("/api/info", &info); err != nil {
-		fmt.Println("Coordinator unreachable (" + err.Error() + ") — running GPU standalone instead.")
-		runGpuStandalone(gpuExe)
-		return
-	}
-	b, _ := hex.DecodeString(info.Hash160)
-	copy(target[:], b)
-	fmt.Printf("Coordinator OK — puzzle #%d, target %s (%s)\n", info.Puzzle, info.Hash160, info.Address)
+	target := fallbackTarget // #72; the child always searches #72 regardless
 
-	var reg struct {
-		DeviceID string `json:"deviceId"`
-		Token    string `json:"token"`
+	// Local progress: everything searched here (this session or earlier), plus a
+	// "pending" list of indices not yet confirmed into the pool.
+	done := loadDoneIdx(gpuProgressFile, "ludkey-progress.txt")
+	pending := make([]uint64, 0, len(done))
+	for k := range done {
+		pending = append(pending, k)
 	}
-	host, _ := os.Hostname()
-	if err := coord.post("/api/register", map[string]string{"name": "gpu-" + host, "type": "native-gpu"}, false, &reg); err != nil {
-		fmt.Println("Register failed (" + err.Error() + ") — running GPU standalone instead.")
-		runGpuStandalone(gpuExe)
-		return
-	}
-	coord.token = reg.Token
-	fmt.Printf("Registered as %s — driving %s\n", reg.DeviceID, gpuExe)
+	fmt.Printf("Loaded %d done segments from local progress.\n", len(done))
 
-	// Resolve the GPU binary to an absolute path. Go refuses to exec a bare
-	// name found in the current directory (ErrDot), so a plain "ludkey_cuda.exe"
-	// fails; prefer the copy sitting next to this agent, else make it absolute.
+	connectAndSync := func() bool {
+		var ri struct {
+			Puzzle  int    `json:"puzzle"`
+			Hash160 string `json:"hash160"`
+		}
+		if err := coord.getJSON("/api/info", &ri); err != nil {
+			return false
+		}
+		var reg struct {
+			DeviceID string `json:"deviceId"`
+			Token    string `json:"token"`
+		}
+		host, _ := os.Hostname()
+		if err := coord.post("/api/register", map[string]string{"name": "gpu-" + host, "type": "native-gpu"}, false, &reg); err != nil {
+			return false
+		}
+		coord.token = reg.Token
+		if b, e := hex.DecodeString(ri.Hash160); e == nil && len(b) == 20 {
+			copy(target[:], b)
+		}
+		if len(pending) > 0 {
+			fmt.Printf("\n[sync] uploading %d segments to the pool...\n", len(pending))
+			if n, ok := importDoneToCoord(coord, pending); ok {
+				fmt.Printf("[sync] imported %d into the pool.\n", n)
+				pending = nil
+			} else {
+				fmt.Println("[sync] upload interrupted — will retry.")
+			}
+		}
+		return true
+	}
+
+	connected := connectAndSync()
+	if connected {
+		fmt.Println("Coordinator OK — joined the pool.")
+	} else {
+		fmt.Println("Coordinator unreachable — starting OFFLINE (will keep searching and upload when it returns).")
+	}
+
+	// Resolve the GPU binary to an absolute path (Go won't exec a bare relative name).
 	exePath := gpuExe
 	if !strings.ContainsAny(exePath, `/\`) {
 		if self, e := os.Executable(); e == nil {
@@ -945,7 +1075,6 @@ func runGpuPool(server, payout, api, gpuExe string) {
 			}
 		}
 	}
-
 	cmd := exec.Command(exePath, "--serve")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -963,7 +1092,6 @@ func runGpuPool(server, payout, api, gpuExe string) {
 		return
 	}
 	br := bufio.NewReader(stdout)
-	// Wait for READY (the child prints its self-test + "READY" first).
 	for {
 		line, err := br.ReadString('\n')
 		if err != nil {
@@ -979,112 +1107,143 @@ func runGpuPool(server, payout, api, gpuExe string) {
 
 	var stop atomic.Bool
 	var scanned uint64
+	pf, _ := os.OpenFile(gpuProgressFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	recordDone := func(idx uint64, pushLater bool) {
+		done[idx] = true
+		if pf != nil {
+			fmt.Fprintf(pf, "%d\n", idx)
+		}
+		if pushLater {
+			pending = append(pending, idx)
+		}
+		atomic.AddUint64(&scanned, 1<<25)
+	}
+
 	go func() {
 		for !stop.Load() {
-			time.Sleep(60 * time.Second) // realtime not needed; stays inside free-tier limits
-			coord.post("/api/heartbeat", map[string]any{"speed": 0, "scanned": fmt.Sprintf("%d", atomic.LoadUint64(&scanned))}, true, nil)
+			time.Sleep(60 * time.Second)
+			if connected {
+				coord.post("/api/heartbeat", map[string]any{"speed": 0, "scanned": fmt.Sprintf("%d", atomic.LoadUint64(&scanned))}, true, nil)
+			}
 		}
 	}()
 
-	fmt.Println("Pool search started — leasing ranges and searching on the GPU.")
+	fmt.Println("Search started.")
 	startTime := time.Now()
 	var chunks uint64
-	type chunkT struct {
-		Index string `json:"index"`
-		Start string `json:"start"`
-		End   string `json:"end"`
-	}
-	const batchChunks = 256 // one lease + one complete per 256 segments
-	for !stop.Load() {
-		var lease struct {
-			Chunks []chunkT `json:"chunks"`
-			Chunk  *chunkT  `json:"chunk"`
-		}
-		if err := coord.post("/api/lease", map[string]any{"count": batchChunks}, true, &lease); err != nil {
-			fmt.Println("\nLease failed (" + err.Error() + ") — GPU switching to standalone.")
-			stdin.Close()
-			cmd.Wait()
-			runGpuStandalone(gpuExe)
-			return
-		}
-		list := lease.Chunks
-		if len(list) == 0 && lease.Chunk != nil { // old coordinator: single chunk
-			list = append(list, *lease.Chunk)
-		}
-		if len(list) == 0 {
-			time.Sleep(2 * time.Second) // nothing free right now
-			continue
-		}
-		completed := make([]string, 0, len(list))
-		foundKey := ""
-		for _, ch := range list {
-			if stop.Load() {
-				break
-			}
-			start := hexToBig(ch.Start)
-			end := hexToBig(ch.End)
-			count := new(big.Int).Add(new(big.Int).Sub(end, start), big.NewInt(1))
-			if _, err := io.WriteString(stdin, fmt.Sprintf("%x %s\n", start, count.String())); err != nil {
-				fmt.Println("\nGPU write failed:", err)
-				stop.Store(true)
-				break
-			}
-			var resp string
-			for {
-				line, err := br.ReadString('\n')
-				if err != nil {
-					fmt.Println("\nGPU read failed:", err)
-					stop.Store(true)
-					break
-				}
-				line = strings.TrimSpace(line)
-				if line == "DONE" || strings.HasPrefix(line, "FOUND ") || strings.HasPrefix(line, "ERR") {
-					resp = line
-					break
-				}
-				fmt.Println("[gpu] " + line)
-			}
-			if stop.Load() {
-				break
-			}
-			if strings.HasPrefix(resp, "FOUND ") {
-				foundKey = strings.TrimSpace(resp[6:])
-				break
-			}
-			if strings.HasPrefix(resp, "ERR") {
-				fmt.Println("\n[gpu] " + resp + " — releasing chunk " + ch.Index)
-				coord.post("/api/release", map[string]any{"chunkIndex": ch.Index}, true, nil)
-				continue
-			}
-			completed = append(completed, ch.Index) // DONE
-			chunks++
-			if c64 := count.Uint64(); c64 > 0 {
-				atomic.AddUint64(&scanned, c64)
-			}
-		}
-		// Report every finished segment of this batch in a single request.
-		if len(completed) > 0 {
-			coord.post("/api/complete", map[string]any{"chunkIndices": completed}, true, nil)
-		}
-		if foundKey != "" {
-			if key, ok := new(big.Int).SetString(foundKey, 16); ok {
-				handleMatch(coord, key, target, payout, api, &stop)
-			}
-			stdin.Close()
-			cmd.Wait()
-			return
-		}
+	var lastRetry time.Time
+	const batchChunks = 256
+
+	printProgress := func(last string) {
 		el := time.Since(startTime).Seconds()
 		rate := 0.0
 		if el > 0 {
 			rate = float64(atomic.LoadUint64(&scanned)) / el / 1e6
 		}
-		last := ""
-		if len(list) > 0 {
-			last = list[len(list)-1].Index
+		mode := "pool"
+		if !connected {
+			mode = "offline"
 		}
-		fmt.Printf("\r[pool] %s chunks done · %s keys · %.2f Mkey/s · last idx %s        ",
-			commas(chunks), commas(atomic.LoadUint64(&scanned)), rate, last)
+		fmt.Printf("\r[%s] %s chunks · %s keys · %.2f Mkey/s · %s        ",
+			mode, commas(chunks), commas(atomic.LoadUint64(&scanned)), rate, last)
+	}
+
+	for !stop.Load() {
+		if connected {
+			var lease struct {
+				Chunks []chunkT `json:"chunks"`
+				Chunk  *chunkT  `json:"chunk"`
+			}
+			if err := coord.post("/api/lease", map[string]any{"count": batchChunks}, true, &lease); err != nil {
+				fmt.Println("\nCoordinator lost (" + err.Error() + ") — switching to OFFLINE.")
+				connected = false
+				lastRetry = time.Now()
+				continue
+			}
+			list := lease.Chunks
+			if len(list) == 0 && lease.Chunk != nil {
+				list = append(list, *lease.Chunk)
+			}
+			if len(list) == 0 {
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			completed := make([]string, 0, len(list))
+			for _, ch := range list {
+				if stop.Load() {
+					break
+				}
+				start := hexToBig(ch.Start)
+				end := hexToBig(ch.End)
+				count := new(big.Int).Add(new(big.Int).Sub(end, start), big.NewInt(1))
+				status, fk := gpuSearchOne(stdin, br, fmt.Sprintf("%x", start), count)
+				if status == "DISCONNECT" {
+					fmt.Println("\nGPU pipe closed — stopping.")
+					stop.Store(true)
+					break
+				}
+				if status == "FOUND" {
+					if key, ok := new(big.Int).SetString(fk, 16); ok {
+						handleMatch(coord, key, target, payout, api, &stop)
+					}
+					stdin.Close()
+					cmd.Wait()
+					return
+				}
+				if status == "ERR" {
+					continue
+				}
+				completed = append(completed, ch.Index)
+				if idx, e := strconv.ParseUint(ch.Index, 10, 64); e == nil {
+					done[idx] = true
+					if pf != nil {
+						fmt.Fprintf(pf, "%d\n", idx)
+					}
+				}
+				chunks++
+				atomic.AddUint64(&scanned, 1<<25)
+			}
+			if len(completed) > 0 {
+				coord.post("/api/complete", map[string]any{"chunkIndices": completed}, true, nil)
+			}
+			last := ""
+			if len(list) > 0 {
+				last = "idx " + list[len(list)-1].Index
+			}
+			printProgress(last)
+		} else {
+			if time.Since(lastRetry) > 30*time.Second {
+				lastRetry = time.Now()
+				if connectAndSync() {
+					connected = true
+					fmt.Println("\n[sync] coordinator back — resuming pool mode.")
+					continue
+				}
+			}
+			for i := 0; i < batchChunks && !stop.Load(); i++ {
+				idx := pickRandomUndone(done)
+				status, fk := gpuSearchOne(stdin, br, segStartHex(idx), new(big.Int).Set(segSizeBig))
+				if status == "DISCONNECT" {
+					fmt.Println("\nGPU pipe closed — stopping.")
+					stop.Store(true)
+					break
+				}
+				if status == "FOUND" {
+					if key, ok := new(big.Int).SetString(fk, 16); ok {
+						handleMatch(coord, key, target, payout, api, &stop)
+					}
+					stdin.Close()
+					cmd.Wait()
+					return
+				}
+				if status == "ERR" {
+					continue
+				}
+				recordDone(idx, true)
+				chunks++
+			}
+			printProgress(fmt.Sprintf("offline, %d local done", len(done)))
+		}
 	}
 	stdin.Close()
 	cmd.Wait()
@@ -1141,6 +1300,7 @@ func speed(s float64) string {
 	}
 	return fmt.Sprintf("%.0f key/s", s)
 }
+
 // outDir is the folder next to the agent binary, where result files are saved
 // so they are always findable regardless of the shell's working directory.
 var outDir string
