@@ -45,8 +45,10 @@ __device__ void jadd(jpoint& r, const jpoint& p, const jpoint& q){
   mod_add(t1,p.Z,q.Z); mod_sqr(t1,t1); mod_sub(t1,t1,Z1); mod_sub(t1,t1,Z2); mod_mul(r.Z,t1,H);
 }
 
-// key*G -> affine (x,y). key is 8 little-endian limbs.
-__device__ void scalar_mul_G(const uint32_t* key, uint32_t* x, uint32_t* y){
+// key*G -> affine (x,y). key is 8 little-endian limbs. Binary double-and-add:
+// clear and proven; used to BUILD the fixed-base comb table below, and kept as
+// the trusted reference the host self-test compares against.
+__device__ void scalar_mul_G_slow(const uint32_t* key, uint32_t* x, uint32_t* y){
   jpoint acc; set_u(acc.X,1); set_u(acc.Y,1); set_u(acc.Z,0);
   jpoint add; cp(add.X,GX); cp(add.Y,GY); set_u(add.Z,1);
   for(int bit=0; bit<256; ++bit){
@@ -54,6 +56,39 @@ __device__ void scalar_mul_G(const uint32_t* key, uint32_t* x, uint32_t* y){
     jpoint t2; jdbl(t2,add); add=t2;
   }
   // to affine
+  uint32_t zi[8],zi2[8],zi3[8];
+  mod_inv(zi,acc.Z); mod_sqr(zi2,zi); mod_mul(zi3,zi2,zi);
+  mod_mul(x,acc.X,zi2); mod_mul(y,acc.Y,zi3);
+}
+
+// ---- fixed-base comb (windowed) scalar multiply ----
+// G is constant, so precompute, for every 4-bit window w (0..63) and nonzero
+// digit d (1..15), the affine point (d << 4w) * G. Then key*G = sum over windows
+// of the table entry for that window's digit — ~60 point additions and ONE
+// inversion, versus 256 doublings + ~128 additions in the binary method. The
+// table is built once on the GPU with scalar_mul_G_slow (proven), so the fast
+// path adds no new field/EC math — only table lookups and the proven jadd.
+__device__ uint32_t d_comb[64][16][16];  // [window][digit][ x0..7, y0..7 ] — 64 KB
+
+__global__ void k_build_comb(){
+  int t = blockIdx.x * blockDim.x + threadIdx.x;   // t = win*16 + d
+  int win = t >> 4, d = t & 15;
+  if(win >= 64 || d == 0) return;                  // d==0 is the identity, never stored
+  uint32_t key[8] = {0,0,0,0,0,0,0,0};
+  int bitpos = 4*win; uint64_t v = (uint64_t)d << (bitpos & 31); int limb = bitpos >> 5;
+  key[limb] |= (uint32_t)v; if(limb+1 < 8) key[limb+1] |= (uint32_t)(v >> 32);
+  uint32_t x[8], y[8]; scalar_mul_G_slow(key, x, y);
+  for(int i=0;i<8;++i){ d_comb[win][d][i] = x[i]; d_comb[win][d][8+i] = y[i]; }
+}
+
+// key*G -> affine (x,y) via the comb table. Requires k_build_comb to have run.
+__device__ void scalar_mul_G(const uint32_t* key, uint32_t* x, uint32_t* y){
+  jpoint acc; set_u(acc.X,1); set_u(acc.Y,1); set_u(acc.Z,0);
+  for(int win=0; win<64; ++win){
+    uint32_t d = (key[win>>3] >> ((4*win)&31)) & 0xF;
+    if(d){ jpoint P; cp(P.X, &d_comb[win][d][0]); cp(P.Y, &d_comb[win][d][8]); set_u(P.Z,1);
+           jpoint t; jadd(t, acc, P); acc = t; }
+  }
   uint32_t zi[8],zi2[8],zi3[8];
   mod_inv(zi,acc.Z); mod_sqr(zi2,zi); mod_mul(zi3,zi2,zi);
   mod_mul(x,acc.X,zi2); mod_mul(y,acc.Y,zi3);

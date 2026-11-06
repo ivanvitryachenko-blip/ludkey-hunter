@@ -306,6 +306,12 @@ int main(int argc, char** argv) {
   printf("GPU: %s  (%d SMs, %.1f GB, CC %d.%d)\n", prop.name, prop.multiProcessorCount,
          prop.totalGlobalMem / 1e9, prop.major, prop.minor);
 
+  // Build the fixed-base comb table once (uses the proven slow multiply); every
+  // scalar_mul_G afterward reads it. Must run before validate(), which tests
+  // the comb-based scalar_mul_G through key->hash160.
+  k_build_comb<<<64, 16>>>(); cudaDeviceSynchronize();
+  { cudaError_t e = cudaGetLastError(); if (e != cudaSuccess) { printf("comb table build error: %s\n", cudaGetErrorString(e)); return 4; } }
+
   if (!validate()) return 2; // honesty gate: never search on a GPU that computes wrong hashes
 
   // `make validate` runs the self-test only.
