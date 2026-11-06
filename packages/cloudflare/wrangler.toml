@@ -28,7 +28,12 @@ class_name = "Coordinator"
 tag = "v1"
 new_sqlite_classes = ["Coordinator"]
 
-# Optional: change the lease segment size (default 2^30, chosen to keep
-# lease/complete request volume low for the free tier). Example for 2^25:
-# [vars]
-# CHUNK_BITS = "25"
+# Segment size is PINNED to 2^25 to match the grid used by every agent
+# (CUDA standalone, the Go agent, and offline mode all index segments as
+# 2^71 + idx*2^25). This must stay 25 so a fresh Durable Object (after any
+# state reset) re-initialises on the SAME grid as the existing progress and
+# the agents — otherwise imported/offline indices would point at the wrong
+# chunks and create gaps in the #72 accounting. Fast GPUs stay inside the
+# free-tier request budget via batch lease/complete, not via a bigger chunk.
+[vars]
+CHUNK_BITS = "25"

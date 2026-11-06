@@ -160,9 +160,9 @@ func rfc6979k(d, z *big.Int) *big.Int {
 	bx := append(int2octets(d, rolen), bits2octets(int2octetsHash(z), rolen)...)
 	v := bytes.Repeat([]byte{0x01}, 32)
 	k := bytes.Repeat([]byte{0x00}, 32)
-	k = hmacSHA256(k, append(append(append(append([]byte{}, v...), 0x00), bx...)))
+	k = hmacSHA256(k, append(append(append([]byte{}, v...), 0x00), bx...))
 	v = hmacSHA256(k, v)
-	k = hmacSHA256(k, append(append(append(append([]byte{}, v...), 0x01), bx...)))
+	k = hmacSHA256(k, append(append(append([]byte{}, v...), 0x01), bx...))
 	v = hmacSHA256(k, v)
 	for {
 		v = hmacSHA256(k, v)
