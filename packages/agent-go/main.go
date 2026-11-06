@@ -982,10 +982,13 @@ func runGpuPool(server, payout, api, gpuExe string) {
 	go func() {
 		for !stop.Load() {
 			time.Sleep(60 * time.Second) // realtime not needed; stays inside free-tier limits
-			coord.post("/api/heartbeat", map[string]any{"scanned": fmt.Sprintf("%d", atomic.LoadUint64(&scanned))}, true, nil)
+			coord.post("/api/heartbeat", map[string]any{"speed": 0, "scanned": fmt.Sprintf("%d", atomic.LoadUint64(&scanned))}, true, nil)
 		}
 	}()
 
+	fmt.Println("Pool search started — leasing ranges and searching on the GPU.")
+	startTime := time.Now()
+	var chunks uint64
 	for !stop.Load() {
 		var lease struct {
 			Chunk *struct {
@@ -1044,9 +1047,17 @@ func runGpuPool(server, payout, api, gpuExe string) {
 			continue
 		}
 		coord.post("/api/complete", map[string]any{"chunkIndex": lease.Chunk.Index}, true, nil)
+		chunks++
 		if c64 := count.Uint64(); c64 > 0 {
 			atomic.AddUint64(&scanned, c64)
 		}
+		el := time.Since(startTime).Seconds()
+		rate := 0.0
+		if el > 0 {
+			rate = float64(atomic.LoadUint64(&scanned)) / el / 1e6
+		}
+		fmt.Printf("\r[pool] %s chunks done · %s keys · %.2f Mkey/s · last idx %s        ",
+			commas(chunks), commas(atomic.LoadUint64(&scanned)), rate, lease.Chunk.Index)
 	}
 	stdin.Close()
 	cmd.Wait()
