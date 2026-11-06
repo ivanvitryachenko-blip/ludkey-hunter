@@ -341,6 +341,58 @@ static int runAvgBench(const uint8_t* targetHost, double secs) {
   return 0;
 }
 
+// out = base + off  (256-bit base, 64-bit offset). Host helper for --serve.
+static void addKeyOffset(const uint32_t base[8], uint64_t off, uint32_t out[8]) {
+  uint64_t c = 0, s;
+  s = (uint64_t)base[0] + (uint32_t)off;        out[0] = (uint32_t)s; c = s >> 32;
+  s = (uint64_t)base[1] + (uint32_t)(off>>32) + c; out[1] = (uint32_t)s; c = s >> 32;
+  for (int i = 2; i < 8; ++i) { s = (uint64_t)base[i] + c; out[i] = (uint32_t)s; c = s >> 32; }
+}
+
+// --serve: GPU worker driven over stdin by the Go agent (which talks to the
+// coordinator). Protocol, one request per line: "<startHex> <count>" -> search
+// the <count> keys starting at <startHex> on the GPU and reply with a single
+// line: "DONE" (no match) or "FOUND <keyHex>" (also written to FOUND_KEY.txt).
+// Prints "READY" once the delta table is built. All networking stays in Go.
+static int runServe(const uint8_t* targetHost) {
+  uint32_t *dBase, *dDeltas; uint8_t *dTarget; uint64_t *dFoundOff; int *dFoundFlag;
+  cudaMalloc(&dBase, 8*4); cudaMalloc(&dDeltas, (WIN-1)*16*4); cudaMalloc(&dTarget, 20); cudaMalloc(&dFoundOff, 8); cudaMalloc(&dFoundFlag, 4);
+  cudaMemcpy(dTarget, targetHost, 20, cudaMemcpyHostToDevice);
+  k_build_deltas<<<(WIN-1+63)/64, 64>>>(dDeltas); cudaDeviceSynchronize();
+  const uint64_t BATCH = 1ull << 22; int threads = TPB;
+  printf("READY\n"); fflush(stdout);
+  char line[256];
+  while (fgets(line, sizeof(line), stdin)) {
+    char hx[160]; unsigned long long count = 0;
+    if (sscanf(line, "%159s %llu", hx, &count) != 2) { printf("ERR parse\n"); fflush(stdout); continue; }
+    uint32_t base[8]; hexToKey(hx, base);
+    bool found = false; uint64_t foundOff = 0, scanned = 0;
+    while (scanned < (uint64_t)count) {
+      uint64_t remain = (uint64_t)count - scanned;
+      uint64_t cnt = remain < BATCH ? remain : BATCH;
+      uint32_t b2[8]; addKeyOffset(base, scanned, b2);
+      cudaMemcpy(dBase, b2, 8*4, cudaMemcpyHostToDevice); cudaMemset(dFoundFlag, 0, 4);
+      uint64_t numThreads = (cnt + WIN - 1) / WIN; int blocks = (int)((numThreads + threads - 1) / threads);
+      k_search_windowed<<<blocks, threads>>>(dBase, cnt, dTarget, dDeltas, dFoundOff, dFoundFlag);
+      cudaDeviceSynchronize();
+      cudaError_t e = cudaGetLastError();
+      if (e != cudaSuccess) { printf("ERR kernel %s\n", cudaGetErrorString(e)); fflush(stdout); found = false; break; }
+      int flag; cudaMemcpy(&flag, dFoundFlag, 4, cudaMemcpyDeviceToHost);
+      if (flag) { uint64_t off; cudaMemcpy(&off, dFoundOff, 8, cudaMemcpyDeviceToHost); found = true; foundOff = scanned + off; break; }
+      scanned += cnt;
+    }
+    if (found) {
+      uint32_t fk[8]; addKeyOffset(base, foundOff, fk); char kh[80]; keyHex(fk, kh);
+      FILE* ff = fopen("FOUND_KEY.txt", "w");
+      if (ff) { fprintf(ff, "when: GPU serve\nprivate key (hex): 0x%s\naddress: %s\n", kh, PUZZLE_ADDR); fclose(ff); }
+      printf("FOUND %s\n", kh); fflush(stdout);
+      return 0; // a find ends the process; the Go agent sweeps from FOUND_KEY.txt
+    }
+    printf("DONE\n"); fflush(stdout);
+  }
+  return 0;
+}
+
 int main(int argc, char** argv) {
   int dev = 0; cudaDeviceProp prop;
   if (cudaGetDeviceProperties(&prop, dev) != cudaSuccess) { printf("No CUDA device found.\n"); return 1; }
@@ -371,6 +423,9 @@ int main(int argc, char** argv) {
     double secs = (i + 1 < argc) ? atof(argv[i+1]) : 30.0; if (secs <= 0) secs = 30.0;
     return runAvgBench(target, secs);
   }
+
+  // Pool worker driven by the Go agent over stdin (coordinator stays in Go).
+  for (int i = 1; i < argc; ++i) if (strcmp(argv[i], "--serve") == 0) return runServe(target);
 
   // Demo/bench base: start of #72 range. A real run gets its base chunk from the
   // coordination server (see README for the HTTP protocol; identical to the

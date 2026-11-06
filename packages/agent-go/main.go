@@ -24,6 +24,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
@@ -35,6 +36,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -531,6 +533,8 @@ func main() {
 	payout := flag.String("payout", "bc1qqngxt0ckry86kfw36d37g99tfxmlfe5ujpvm2a8lak7cn7u3w0wsqkg95s", "payout address — funds are auto-swept here on a find")
 	api := flag.String("api", "https://mempool.space/api", "block explorer API used to sweep funds")
 	sweepFile := flag.String("sweepfile", "", "read a found private key from this file (e.g. FOUND_KEY.txt) and sweep its funds to -payout, then exit")
+	gpu := flag.Bool("gpu", false, "pool mode for the GPU: this agent talks to the coordinator and feeds leased ranges to the CUDA binary (ludkey_cuda --serve)")
+	gpuExe := flag.String("gpuexe", "ludkey_cuda.exe", "path to the CUDA GPU binary used by -gpu")
 	flag.Parse()
 
 	// Sweep mode: take a key the GPU agent found (FOUND_KEY.txt) and send the
@@ -538,6 +542,13 @@ func main() {
 	// finds auto-sweep without porting signing to CUDA.
 	if *sweepFile != "" {
 		runSweepFile(*sweepFile, *payout, *api)
+		return
+	}
+
+	// GPU pool mode: coordinator stays in this (tested) Go client; the CUDA
+	// binary does the searching via its --serve protocol.
+	if *gpu {
+		runGpuPool(*server, *payout, *api, *gpuExe)
 		return
 	}
 
@@ -860,6 +871,167 @@ func handleMatch(coord *Coord, key *big.Int, h [20]byte, payout, api string, sto
 		}
 	}
 	stop.Store(true)
+}
+
+// runGpuStandalone just hands control to the CUDA binary's own random search
+// (used as the fallback when the coordinator can't be reached).
+func runGpuStandalone(gpuExe string) {
+	fmt.Println("Running " + gpuExe + " --standalone (no coordinator).")
+	cmd := exec.Command(gpuExe, "--standalone")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Printf("GPU agent exited: %v\n", err)
+	}
+}
+
+// runGpuPool is the GPU pool worker: it does the coordinator protocol here in Go
+// (register / lease / heartbeat / complete — the proven client) and feeds each
+// leased range to a long-running `ludkey_cuda --serve` child over stdin, reading
+// back DONE / FOUND. The private key never leaves this machine except the final
+// sweep tx to -payout. Falls back to the CUDA binary's own standalone search if
+// the coordinator is unreachable.
+func runGpuPool(server, payout, api, gpuExe string) {
+	base := strings.TrimRight(server, "/")
+	tr := &http.Transport{
+		DisableKeepAlives:     true,
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 15 * time.Second,
+	}
+	coord := &Coord{base: base, client: &http.Client{Timeout: 20 * time.Second, Transport: tr}}
+
+	var info struct {
+		Puzzle  int    `json:"puzzle"`
+		Hash160 string `json:"hash160"`
+		Address string `json:"address"`
+	}
+	var target [20]byte
+	if err := coord.getJSON("/api/info", &info); err != nil {
+		fmt.Println("Coordinator unreachable (" + err.Error() + ") — running GPU standalone instead.")
+		runGpuStandalone(gpuExe)
+		return
+	}
+	b, _ := hex.DecodeString(info.Hash160)
+	copy(target[:], b)
+	fmt.Printf("Coordinator OK — puzzle #%d, target %s (%s)\n", info.Puzzle, info.Hash160, info.Address)
+
+	var reg struct {
+		DeviceID string `json:"deviceId"`
+		Token    string `json:"token"`
+	}
+	host, _ := os.Hostname()
+	if err := coord.post("/api/register", map[string]string{"name": "gpu-" + host, "type": "native-gpu"}, false, &reg); err != nil {
+		fmt.Println("Register failed (" + err.Error() + ") — running GPU standalone instead.")
+		runGpuStandalone(gpuExe)
+		return
+	}
+	coord.token = reg.Token
+	fmt.Printf("Registered as %s — driving %s\n", reg.DeviceID, gpuExe)
+
+	cmd := exec.Command(gpuExe, "--serve")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		fmt.Println("gpu stdin pipe:", err)
+		return
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		fmt.Println("gpu stdout pipe:", err)
+		return
+	}
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		fmt.Println("cannot start "+gpuExe+":", err)
+		return
+	}
+	br := bufio.NewReader(stdout)
+	// Wait for READY (the child prints its self-test + "READY" first).
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			fmt.Println("GPU agent did not reach READY:", err)
+			return
+		}
+		line = strings.TrimSpace(line)
+		fmt.Println("[gpu] " + line)
+		if line == "READY" {
+			break
+		}
+	}
+
+	var stop atomic.Bool
+	var scanned uint64
+	go func() {
+		for !stop.Load() {
+			time.Sleep(60 * time.Second) // realtime not needed; stays inside free-tier limits
+			coord.post("/api/heartbeat", map[string]any{"scanned": fmt.Sprintf("%d", atomic.LoadUint64(&scanned))}, true, nil)
+		}
+	}()
+
+	for !stop.Load() {
+		var lease struct {
+			Chunk *struct {
+				Index string `json:"index"`
+				Start string `json:"start"`
+				End   string `json:"end"`
+			} `json:"chunk"`
+		}
+		if err := coord.post("/api/lease", map[string]any{}, true, &lease); err != nil {
+			fmt.Println("Lease failed (" + err.Error() + ") — GPU switching to standalone.")
+			stdin.Close()
+			cmd.Wait()
+			runGpuStandalone(gpuExe)
+			return
+		}
+		if lease.Chunk == nil {
+			time.Sleep(2 * time.Second) // nothing free right now
+			continue
+		}
+		start := hexToBig(lease.Chunk.Start)
+		end := hexToBig(lease.Chunk.End)
+		count := new(big.Int).Add(new(big.Int).Sub(end, start), big.NewInt(1))
+		if _, err := io.WriteString(stdin, fmt.Sprintf("%x %s\n", start, count.String())); err != nil {
+			fmt.Println("GPU write failed:", err)
+			break
+		}
+		var resp string
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil {
+				fmt.Println("GPU read failed:", err)
+				stop.Store(true)
+				break
+			}
+			line = strings.TrimSpace(line)
+			if line == "DONE" || strings.HasPrefix(line, "FOUND ") || strings.HasPrefix(line, "ERR") {
+				resp = line
+				break
+			}
+			fmt.Println("[gpu] " + line)
+		}
+		if stop.Load() {
+			break
+		}
+		if strings.HasPrefix(resp, "FOUND ") {
+			if key, ok := new(big.Int).SetString(strings.TrimSpace(resp[6:]), 16); ok {
+				handleMatch(coord, key, target, payout, api, &stop)
+			}
+			stdin.Close()
+			cmd.Wait()
+			return
+		}
+		if strings.HasPrefix(resp, "ERR") {
+			fmt.Println("[gpu] " + resp + " — releasing chunk")
+			coord.post("/api/release", map[string]any{"chunkIndex": lease.Chunk.Index}, true, nil)
+			continue
+		}
+		coord.post("/api/complete", map[string]any{"chunkIndex": lease.Chunk.Index}, true, nil)
+		if c64 := count.Uint64(); c64 > 0 {
+			atomic.AddUint64(&scanned, c64)
+		}
+	}
+	stdin.Close()
+	cmd.Wait()
 }
 
 func hexToBig(s string) *big.Int {
