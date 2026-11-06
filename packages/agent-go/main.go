@@ -928,7 +928,25 @@ func runGpuPool(server, payout, api, gpuExe string) {
 	coord.token = reg.Token
 	fmt.Printf("Registered as %s — driving %s\n", reg.DeviceID, gpuExe)
 
-	cmd := exec.Command(gpuExe, "--serve")
+	// Resolve the GPU binary to an absolute path. Go refuses to exec a bare
+	// name found in the current directory (ErrDot), so a plain "ludkey_cuda.exe"
+	// fails; prefer the copy sitting next to this agent, else make it absolute.
+	exePath := gpuExe
+	if !strings.ContainsAny(exePath, `/\`) {
+		if self, e := os.Executable(); e == nil {
+			cand := filepath.Join(filepath.Dir(self), exePath)
+			if _, e := os.Stat(cand); e == nil {
+				exePath = cand
+			}
+		}
+		if !filepath.IsAbs(exePath) {
+			if abs, e := filepath.Abs(exePath); e == nil {
+				exePath = abs
+			}
+		}
+	}
+
+	cmd := exec.Command(exePath, "--serve")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		fmt.Println("gpu stdin pipe:", err)
@@ -941,7 +959,7 @@ func runGpuPool(server, payout, api, gpuExe string) {
 	}
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
-		fmt.Println("cannot start "+gpuExe+":", err)
+		fmt.Println("cannot start "+exePath+":", err)
 		return
 	}
 	br := bufio.NewReader(stdout)
