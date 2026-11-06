@@ -24,11 +24,11 @@
 
 // Window size: keys per thread. Override at build time with -DWIN=.. (make WIN=96).
 #ifndef WIN
-#define WIN 64
+#define WIN 896   // tuned for GTX 1650 (sm_75) — measured best; override with -DWIN=
 #endif
 // Threads per block (override with -DTPB=..; sweep 128/192/256/384/512 per GPU).
 #ifndef TPB
-#define TPB 256
+#define TPB 128   // tuned for GTX 1650 (sm_75) — measured best; override with -DTPB=
 #endif
 
 __device__ void hash160_of_key(const uint32_t* key, uint8_t out[20]) {
