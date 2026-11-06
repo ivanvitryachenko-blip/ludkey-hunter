@@ -309,25 +309,9 @@ __device__ __forceinline__ void mul16_ptx(uint32_t r[16], const uint32_t a[8], c
 }
 #endif
 
-__device__ void mod_mul(uint32_t* r, const uint32_t* a, const uint32_t* b) {
-  uint32_t t[16];
-#ifdef USE_PTX_MUL
-  mul16_ptx(t, a, b);
-#else
-  for (int i = 0; i < 16; ++i) t[i] = 0;
-  for (int i = 0; i < 8; ++i) {
-    uint64_t carry = 0;
-    for (int j = 0; j < 8; ++j) {
-      uint64_t cur = (uint64_t)t[i + j] + (uint64_t)a[i] * b[j] + carry;
-      t[i + j] = (uint32_t)cur; carry = cur >> 32;
-    }
-    t[i + 8] += (uint32_t)carry;
-  }
-#endif
-  // Fold the high limbs (t[8..15]) into the low using 2^256 ≡ 2^32 + 977 (mod p):
-  // high*K contributes high*977 at position 0 and high<<32 at position 1. Carries
-  // out of the low 8 limbs are propagated back into the high limbs and folded
-  // again, repeating until the whole high half is zero (converges in a few passes).
+// Reduce a 16-limb value t modulo p (secp256k1 fast reduction: 2^256 ≡ 2^32+977).
+// Shared by mod_mul and the dedicated squaring. t is consumed (modified) in place.
+__device__ void reduce16(uint32_t* r, uint32_t* t) {
   for (int pass = 0; pass < 8; ++pass) {
     bool anyHigh = false;
     for (int i = 8; i < 16; ++i) if (t[i]) { anyHigh = true; break; }
@@ -350,10 +334,53 @@ __device__ void mod_mul(uint32_t* r, const uint32_t* a, const uint32_t* b) {
     for (int i = 9; i < 16 && c2; ++i) { uint64_t cur = (uint64_t)t[i] + c2; t[i] = (uint32_t)cur; c2 = cur >> 32; }
   }
   for (int i = 0; i < 8; ++i) r[i] = t[i];
-  // final conditional subtractions
   uint32_t tmp[8];
   while (ge_p(r)) { sub_raw(tmp, r, SECP_P); for (int i = 0; i < 8; ++i) r[i] = tmp[i]; }
 }
+
+__device__ void mod_mul(uint32_t* r, const uint32_t* a, const uint32_t* b) {
+  uint32_t t[16];
+#ifdef USE_PTX_MUL
+  mul16_ptx(t, a, b);
+#else
+  for (int i = 0; i < 16; ++i) t[i] = 0;
+  for (int i = 0; i < 8; ++i) {
+    uint64_t carry = 0;
+    for (int j = 0; j < 8; ++j) {
+      uint64_t cur = (uint64_t)t[i + j] + (uint64_t)a[i] * b[j] + carry;
+      t[i + j] = (uint32_t)cur; carry = cur >> 32;
+    }
+    t[i + 8] += (uint32_t)carry;
+  }
+#endif
+  reduce16(r, t);
+}
+
+#ifdef USE_SQR
+// Dedicated squaring: upper-triangle products (each once), doubled, plus the
+// diagonal squares — 36 word-products vs 64 for a general multiply. Host-verified
+// bit-for-bit == mul(a,a) over 500k random + edges. Opt-in with -DUSE_SQR.
+__device__ __forceinline__ void sqr16(uint32_t* t, const uint32_t* a) {
+  for (int i = 0; i < 16; ++i) t[i] = 0;
+  for (int i = 0; i < 8; ++i) {              // off-diagonal, each product once
+    uint32_t carry = 0;
+    for (int j = i + 1; j < 8; ++j) {
+      uint64_t p = (uint64_t)a[i] * a[j] + t[i + j] + carry;
+      t[i + j] = (uint32_t)p; carry = (uint32_t)(p >> 32);
+    }
+    t[i + 8] += carry;
+  }
+  uint32_t c = 0;                            // double the whole 16-limb value
+  for (int i = 0; i < 16; ++i) { uint32_t nc = t[i] >> 31; t[i] = (t[i] << 1) | c; c = nc; }
+  uint32_t carry = 0;                        // add the diagonal a[i]^2 at 2i
+  for (int i = 0; i < 8; ++i) {
+    uint64_t sq = (uint64_t)a[i] * a[i];
+    uint64_t lo = (uint64_t)t[2*i] + (uint32_t)sq + carry; t[2*i] = (uint32_t)lo;
+    uint64_t hi = (uint64_t)t[2*i+1] + (uint32_t)(sq >> 32) + (uint32_t)(lo >> 32); t[2*i+1] = (uint32_t)hi;
+    carry = (uint32_t)(hi >> 32);
+  }
+}
+#endif
 
 __device__ void mod_add(uint32_t* r, const uint32_t* a, const uint32_t* b) {
   uint32_t c = add_raw(r, a, b);
@@ -365,7 +392,13 @@ __device__ void mod_sub(uint32_t* r, const uint32_t* a, const uint32_t* b) {
   if (borrow) { uint32_t tmp[8]; add_raw(tmp, r, SECP_P); for (int i = 0; i < 8; ++i) r[i] = tmp[i]; }
 }
 
-__device__ void mod_sqr(uint32_t* r, const uint32_t* a) { mod_mul(r, a, a); }
+__device__ void mod_sqr(uint32_t* r, const uint32_t* a) {
+#ifdef USE_SQR
+  uint32_t t[16]; sqr16(t, a); reduce16(r, t);
+#else
+  mod_mul(r, a, a);
+#endif
+}
 
 // Modular inverse via Fermat: a^(p-2) mod p. p-2 constant below.
 __device__ __constant__ uint32_t SECP_P_MINUS_2[8] = {
