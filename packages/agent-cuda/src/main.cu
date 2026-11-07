@@ -71,8 +71,19 @@ __device__ __forceinline__ void check_point(const uint32_t* x, const uint32_t* y
 // iG deltas, using a SINGLE Montgomery batch inversion per window. Mirrors the
 // proven model (packages/web-webgpu/model/kernel.mjs), which is verified against
 // per-key scalar multiplication across the #72 range.
-__global__ void k_search_windowed(const uint32_t* base, uint64_t count, const uint8_t* target,
-                                  const uint32_t* deltas, uint64_t* foundOffset, int* foundFlag) {
+// Load 8 consecutive limbs through the read-only data cache (__ldg). The delta
+// table is read-only and every thread in a warp reads the SAME deltas[i] at the
+// same loop step (lock-step broadcast), so routing these loads through the
+// read-only cache is the ideal access pattern.
+__device__ __forceinline__ void ldg8(uint32_t* d, const uint32_t* __restrict__ s) {
+  #pragma unroll
+  for (int j = 0; j < 8; ++j) d[j] = __ldg(&s[j]);
+}
+
+__global__ void k_search_windowed(const uint32_t* __restrict__ base, uint64_t count,
+                                  const uint8_t* __restrict__ target,
+                                  const uint32_t* __restrict__ deltas,
+                                  uint64_t* foundOffset, int* foundFlag) {
   uint64_t tid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
   uint64_t firstKey = tid * (uint64_t)WIN;
   if (firstKey >= count) return;
@@ -89,7 +100,8 @@ __global__ void k_search_windowed(const uint32_t* base, uint64_t count, const ui
   uint32_t prefix[WIN - 1][8];
   uint32_t accf[8]; set_u(accf, 1);
   for (uint64_t i = 0; i < used; ++i) {
-    uint32_t dx[8]; mod_sub(dx, &deltas[i*16], bx);
+    uint32_t dxv[8]; ldg8(dxv, &deltas[i*16]);            // read-only cached delta.x
+    uint32_t dx[8]; mod_sub(dx, dxv, bx);
     uint32_t t[8]; mod_mul(t, accf, dx); cp(accf, t);
     cp(prefix[i], accf);
   }
@@ -97,13 +109,16 @@ __global__ void k_search_windowed(const uint32_t* base, uint64_t count, const ui
   // backward: recover each inverse, form the point, hash + compare
   for (uint64_t ii = 0; ii < used; ++ii) {
     uint64_t i = used - 1 - ii;
-    uint32_t dx[8]; mod_sub(dx, &deltas[i*16], bx);
+    uint32_t dxv[8], dyv[8];
+    ldg8(dxv, &deltas[i*16]);          // delta.x — one cached load, reused below
+    ldg8(dyv, &deltas[i*16 + 8]);      // delta.y
+    uint32_t dx[8]; mod_sub(dx, dxv, bx);
     uint32_t invdx[8];
     if (i == 0) cp(invdx, inv); else mod_mul(invdx, inv, prefix[i - 1]);
     { uint32_t t[8]; mod_mul(t, inv, dx); cp(inv, t); }
-    uint32_t dy[8]; mod_sub(dy, &deltas[i*16 + 8], by);
+    uint32_t dy[8]; mod_sub(dy, dyv, by);
     uint32_t lam[8]; mod_mul(lam, dy, invdx);                 // (y2-y1)/(x2-x1)
-    uint32_t x3[8], t1[8]; mod_sqr(t1, lam); mod_sub(t1, t1, bx); mod_sub(x3, t1, &deltas[i*16]);
+    uint32_t x3[8], t1[8]; mod_sqr(t1, lam); mod_sub(t1, t1, bx); mod_sub(x3, t1, dxv);
     uint32_t y3[8], t2[8]; mod_sub(t2, bx, x3); mod_mul(t2, lam, t2); mod_sub(y3, t2, by);
     check_point(x3, y3, target, firstKey + 1 + i, foundOffset, foundFlag);
   }
