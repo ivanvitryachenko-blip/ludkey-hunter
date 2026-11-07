@@ -1798,6 +1798,7 @@ function assignRandomChunk(entry){
 
 async function startSearch(){
   if(running) return;
+  matches = 0; // per-session: a prior demo/other find must NOT leak a false MATCH into this session's history
   const mode = $("mode").value; currentMode = mode;
   const backend = $("backend") ? $("backend").value : "cpu";
 
